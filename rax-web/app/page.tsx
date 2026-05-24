@@ -23,11 +23,16 @@ export default async function HomePage({
           </p>
         </div>
         <LoginForm next={next ?? '/app/dashboard'} />
-        <p className="text-xs text-neutral-500">
-          By signing in you agree to{' '}
-          <Link href="/terms" className="underline">terms</Link> and{' '}
-          <Link href="/privacy" className="underline">privacy</Link>.
-        </p>
+        <div className="flex items-center justify-between text-xs">
+          <Link href="/download" className="text-neutral-400 hover:text-white transition-colors">
+            ↓ Download for macOS
+          </Link>
+          <p className="text-neutral-500">
+            <Link href="/terms" className="underline">terms</Link>
+            {' · '}
+            <Link href="/privacy" className="underline">privacy</Link>
+          </p>
+        </div>
       </div>
     </main>
   )
