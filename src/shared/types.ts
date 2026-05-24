@@ -1,0 +1,727 @@
+// ─── Claude Code Stream Event Types (verified from v2.1.63) ───
+
+export interface InitEvent {
+  type: 'system'
+  subtype: 'init'
+  cwd: string
+  session_id: string
+  tools: string[]
+  mcp_servers: Array<{ name: string; status: string }>
+  model: string
+  permissionMode: string
+  agents: string[]
+  skills: string[]
+  plugins: string[]
+  claude_code_version: string
+  fast_mode_state: string
+  uuid: string
+}
+
+export interface StreamEvent {
+  type: 'stream_event'
+  event: StreamSubEvent
+  session_id: string
+  parent_tool_use_id: string | null
+  uuid: string
+}
+
+export type StreamSubEvent =
+  | { type: 'message_start'; message: AssistantMessagePayload }
+  | { type: 'content_block_start'; index: number; content_block: ContentBlock }
+  | { type: 'content_block_delta'; index: number; delta: ContentDelta }
+  | { type: 'content_block_stop'; index: number }
+  | { type: 'message_delta'; delta: { stop_reason: string | null }; usage: UsageData; context_management?: unknown }
+  | { type: 'message_stop' }
+
+export interface ContentBlock {
+  type: 'text' | 'tool_use'
+  text?: string
+  id?: string
+  name?: string
+  input?: Record<string, unknown>
+}
+
+export type ContentDelta =
+  | { type: 'text_delta'; text: string }
+  | { type: 'input_json_delta'; partial_json: string }
+
+export interface AssistantEvent {
+  type: 'assistant'
+  message: AssistantMessagePayload
+  parent_tool_use_id: string | null
+  session_id: string
+  uuid: string
+}
+
+export interface AssistantMessagePayload {
+  model: string
+  id: string
+  role: 'assistant'
+  content: ContentBlock[]
+  stop_reason: string | null
+  usage: UsageData
+}
+
+export interface RateLimitEvent {
+  type: 'rate_limit_event'
+  rate_limit_info: {
+    status: string
+    resetsAt: number
+    rateLimitType: string
+  }
+  session_id: string
+  uuid: string
+}
+
+export interface ResultEvent {
+  type: 'result'
+  subtype: 'success' | 'error'
+  is_error: boolean
+  duration_ms: number
+  num_turns: number
+  result: string
+  total_cost_usd: number
+  session_id: string
+  usage: UsageData & {
+    input_tokens: number
+    output_tokens: number
+    cache_read_input_tokens?: number
+    cache_creation_input_tokens?: number
+  }
+  permission_denials: string[]
+  uuid: string
+}
+
+export interface UsageData {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+  service_tier?: string
+}
+
+export interface PermissionEvent {
+  type: 'permission_request'
+  tool: { name: string; description?: string; input?: Record<string, unknown> }
+  question_id: string
+  options: Array<{ id: string; label: string; kind?: string }>
+  session_id: string
+  uuid: string
+}
+
+// Union of all possible top-level events
+export type ClaudeEvent = InitEvent | StreamEvent | AssistantEvent | RateLimitEvent | ResultEvent | PermissionEvent | UnknownEvent
+
+export interface UnknownEvent {
+  type: string
+  [key: string]: unknown
+}
+
+// ─── Tab State Machine (v2 — from execution plan) ───
+
+export type TabStatus = 'connecting' | 'idle' | 'running' | 'completed' | 'failed' | 'dead'
+
+export interface PermissionRequest {
+  questionId: string
+  toolTitle: string
+  toolDescription?: string
+  toolInput?: Record<string, unknown>
+  options: Array<{ optionId: string; kind?: string; label: string }>
+}
+
+export interface Attachment {
+  id: string
+  type: 'image' | 'file'
+  name: string
+  path: string
+  mimeType?: string
+  /** Base64 data URL for image previews */
+  dataUrl?: string
+  /** File size in bytes */
+  size?: number
+}
+
+export interface TabState {
+  id: string
+  claudeSessionId: string | null
+  status: TabStatus
+  activeRequestId: string | null
+  hasUnread: boolean
+  currentActivity: string
+  permissionQueue: PermissionRequest[]
+  /** Fallback card when tools were denied and no interactive permission is available.
+   *  hookReached=true means a PermissionCard was shown and the user (or timeout)
+   *  decided deny. hookReached=false means Claude's tool was denied without the
+   *  permission prompt ever reaching the user — usually a hook/Claude-CLI mismatch
+   *  or a closed tab. The card uses this to show the right explanation. */
+  permissionDenied: { tools: Array<{ toolName: string; toolUseId: string }>; hookReached: boolean } | null
+  attachments: Attachment[]
+  messages: Message[]
+  title: string
+  /** Last run's result data (cost, tokens, duration) */
+  lastResult: RunResult | null
+  /** Session metadata from init event */
+  sessionModel: string | null
+  sessionTools: string[]
+  sessionMcpServers: Array<{ name: string; status: string }>
+  sessionSkills: string[]
+  sessionVersion: string | null
+  /** Prompts waiting behind the current run (display text only) */
+  queuedPrompts: string[]
+  /** Working directory for this tab's Claude sessions */
+  workingDirectory: string
+  /** Whether the user explicitly chose a directory (vs. using default home) */
+  hasChosenDirectory: boolean
+  /** Extra directories accessible via --add-dir (session-preserving) */
+  additionalDirs: string[]
+  /** True for the pinned voice-orb tab. Renders with blue theme + voice
+   *  icon, no × button, no composer. Receives streamed orb events instead
+   *  of running a per-tab claude session. */
+  isOrbTab?: boolean
+  /** Identifies which agent (Max / Alex / Luna / Nova / Zara) this tab
+   *  represents. For the agent-bound tabs, `agentId === id` — the agent's
+   *  stable identifier IS the registered tab id used by main's ControlPlane.
+   *  Undefined for the legacy free-form chat path and for the voice orb tab. */
+  agentId?: string
+  /** Agent tabs start hidden — they exist in the store and are registered
+   *  with main's ControlPlane, but the pill tab strip skips them so the
+   *  default UI matches the pre-multi-agent build. Clicking an agent in the
+   *  dock un-hides its tab (and selects it). Closing an agent tab via the
+   *  pill's × hides it again. Always undefined / false for non-agent tabs
+   *  (the orb tab and free-form chats). */
+  hidden?: boolean
+}
+
+/** Stable id of the pinned voice-orb tab. Reserved sentinel — never used
+ *  as a real claude tab id. Kept in sync between renderer and main. */
+export const ORB_TAB_ID = 'orb-tab'
+
+export interface Message {
+  id: string
+  role: 'user' | 'assistant' | 'tool' | 'system'
+  content: string
+  toolName?: string
+  toolInput?: string
+  toolStatus?: 'running' | 'completed' | 'error'
+  timestamp: number
+  /**
+   * Voice-orb only: this user turn rode in with an auto-attached screenshot
+   * of the user's screen (handled by the auto-screenshot pipeline). The chip
+   * is rendered next to the bubble so the read-only voice tab matches what
+   * the model actually saw. No image bytes are shipped to the renderer — the
+   * flag is metadata only.
+   */
+  hasAutoScreenshot?: boolean
+}
+
+export interface RunResult {
+  totalCostUsd: number
+  durationMs: number
+  numTurns: number
+  usage: UsageData
+  sessionId: string
+}
+
+// ─── Canonical Events (normalized from raw stream) ───
+
+export type NormalizedEvent =
+  | { type: 'session_init'; sessionId: string; tools: string[]; model: string; mcpServers: Array<{ name: string; status: string }>; skills: string[]; version: string; isWarmup?: boolean }
+  | { type: 'text_chunk'; text: string }
+  | { type: 'tool_call'; toolName: string; toolId: string; index: number }
+  | { type: 'tool_call_update'; toolId: string; partialInput: string }
+  | { type: 'tool_call_complete'; index: number }
+  | { type: 'task_update'; message: AssistantMessagePayload }
+  | { type: 'task_complete'; result: string; costUsd: number; durationMs: number; numTurns: number; usage: UsageData; sessionId: string; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }
+  | { type: 'error'; message: string; isError: boolean; sessionId?: string }
+  | { type: 'session_dead'; exitCode: number | null; signal: string | null; stderrTail: string[] }
+  | { type: 'rate_limit'; status: string; resetsAt: number; rateLimitType: string }
+  | { type: 'usage'; usage: UsageData }
+  | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
+  | { type: 'permission_resolved'; questionId: string; reason: 'timeout' | 'run-ended' | 'shutdown' | 'tab-closed' }
+
+// ─── Run Options ───
+
+export interface RunOptions {
+  prompt: string
+  projectPath: string
+  sessionId?: string
+  allowedTools?: string[]
+  maxTurns?: number
+  maxBudgetUsd?: number
+  systemPrompt?: string
+  model?: string
+  /** Path to RAX-scoped settings file with hook config (passed via --settings) */
+  hookSettingsPath?: string
+  /** Extra directories to add via --add-dir (session-preserving) */
+  addDirs?: string[]
+  /** Global permission mode at dispatch time. Injected by ControlPlane. */
+  permissionMode?: 'ask' | 'auto' | 'bypass'
+}
+
+// ─── Control Plane Types ───
+
+export interface TabRegistryEntry {
+  tabId: string
+  claudeSessionId: string | null
+  status: TabStatus
+  activeRequestId: string | null
+  runPid: number | null
+  createdAt: number
+  lastActivityAt: number
+  promptCount: number
+}
+
+export interface HealthReport {
+  tabs: Array<{
+    tabId: string
+    status: TabStatus
+    activeRequestId: string | null
+    claudeSessionId: string | null
+    alive: boolean
+  }>
+  queueDepth: number
+}
+
+export interface EnrichedError {
+  message: string
+  stderrTail: string[]
+  stdoutTail?: string[]
+  exitCode: number | null
+  elapsedMs: number
+  toolCallCount: number
+  sawPermissionRequest?: boolean
+  permissionDenials?: Array<{ tool_name: string; tool_use_id: string }>
+}
+
+// ─── Session History ───
+
+export interface SessionMeta {
+  sessionId: string
+  slug: string | null
+  firstMessage: string | null
+  lastTimestamp: string
+  size: number
+}
+
+export interface SessionLoadMessage {
+  role: string
+  content: string
+  toolName?: string
+  timestamp: number
+}
+
+// ─── Marketplace / Plugin Types ───
+
+export type PluginStatus = 'not_installed' | 'checking' | 'installing' | 'installed' | 'failed'
+
+export interface CatalogPlugin {
+  id: string              // unique: `${repo}/${skillPath}` e.g. 'anthropics/skills/skills/xlsx'
+  name: string            // from SKILL.md or plugin.json
+  description: string     // from SKILL.md or plugin.json
+  version: string         // from plugin.json or '0.0.0'
+  author: string          // from plugin.json or marketplace entry
+  marketplace: string     // marketplace name from marketplace.json
+  repo: string            // 'anthropics/skills'
+  sourcePath: string      // path within repo, e.g. 'skills/xlsx'
+  installName: string     // individual skill name for SKILL.md skills, bundle name for CLI plugins
+  category: string        // 'Agent Skills' | 'Knowledge Work' | 'Financial Services'
+  tags: string[]          // Semantic use-case tags derived from name/description (e.g. 'Design', 'Finance')
+  isSkillMd: boolean      // true = individual SKILL.md (direct install), false = CLI plugin (bundle install)
+}
+
+// ─── Cross-renderer state mirror ───
+// The pill and fullscreen window each own a Zustand store. Optimistic-only
+// mutations (user messages, tab CRUD, working directory, etc.) need to be
+// mirrored from the active renderer → main → other renderer so both stay
+// coherent. Streaming events from Claude already broadcast to both renderers
+// via rax:normalized-event, so they aren't mirrored here.
+
+export type MirrorAction =
+  | { kind: 'user-message'; tabId: string; messageId: string; content: string; timestamp: number }
+  | { kind: 'system-message'; tabId: string; messageId: string; content: string; timestamp: number }
+  | { kind: 'tab-created'; tabId: string; workingDirectory: string }
+  | { kind: 'tab-closed'; tabId: string }
+  | { kind: 'tab-selected'; tabId: string }
+  | { kind: 'tab-cleared'; tabId: string }
+  | { kind: 'tab-title'; tabId: string; title: string }
+  | { kind: 'attachments-add'; tabId: string; attachments: Attachment[] }
+  | { kind: 'attachments-remove'; tabId: string; attachmentId: string }
+  | { kind: 'attachments-clear'; tabId: string }
+  | { kind: 'directory-set'; tabId: string; directory: string }
+  | { kind: 'directory-add'; tabId: string; directory: string }
+  | { kind: 'directory-remove'; tabId: string; directory: string }
+  | { kind: 'preferred-model'; model: string | null }
+  | { kind: 'permission-mode'; mode: 'ask' | 'auto' | 'bypass' }
+
+export interface SessionSnapshot {
+  tabs: TabState[]
+  activeTabId: string
+  preferredModel: string | null
+  permissionMode: 'ask' | 'auto' | 'bypass'
+}
+
+// ─── Default model ───
+// Single source of truth for the model used when the user hasn't picked one,
+// and when subprocesses (orb, etc.) need an explicit fallback. Shared between
+// main and renderer.
+export const DEFAULT_MODEL_ID = 'claude-opus-4-7'
+
+// ─── IPC Channel Names ───
+
+export const IPC = {
+  // Request-response (renderer → main)
+  START: 'rax:start',
+  CREATE_TAB: 'rax:create-tab',
+  PROMPT: 'rax:prompt',
+  CANCEL: 'rax:cancel',
+  STOP_TAB: 'rax:stop-tab',
+  RETRY: 'rax:retry',
+  STATUS: 'rax:status',
+  TAB_HEALTH: 'rax:tab-health',
+  CLOSE_TAB: 'rax:close-tab',
+  SELECT_DIRECTORY: 'rax:select-directory',
+  OPEN_EXTERNAL: 'rax:open-external',
+  OPEN_IN_TERMINAL: 'rax:open-in-terminal',
+  ATTACH_FILES: 'rax:attach-files',
+  TAKE_SCREENSHOT: 'rax:take-screenshot',
+  TRANSCRIBE_AUDIO: 'rax:transcribe-audio',
+  PASTE_IMAGE: 'rax:paste-image',
+  GET_DIAGNOSTICS: 'rax:get-diagnostics',
+  RESPOND_PERMISSION: 'rax:respond-permission',
+  INIT_SESSION: 'rax:init-session',
+  RESET_TAB_SESSION: 'rax:reset-tab-session',
+  ANIMATE_HEIGHT: 'rax:animate-height',
+  LIST_SESSIONS: 'rax:list-sessions',
+  LOAD_SESSION: 'rax:load-session',
+  EXPORT_TRANSCRIPT: 'rax:export-transcript',
+
+  // One-way events (main → renderer)
+  TEXT_CHUNK: 'rax:text-chunk',
+  TOOL_CALL: 'rax:tool-call',
+  TOOL_CALL_UPDATE: 'rax:tool-call-update',
+  TOOL_CALL_COMPLETE: 'rax:tool-call-complete',
+  TASK_UPDATE: 'rax:task-update',
+  TASK_COMPLETE: 'rax:task-complete',
+  SESSION_DEAD: 'rax:session-dead',
+  SESSION_INIT: 'rax:session-init',
+  ERROR: 'rax:error',
+  RATE_LIMIT: 'rax:rate-limit',
+
+  // Window management
+  RESIZE_HEIGHT: 'rax:resize-height',
+  SET_WINDOW_WIDTH: 'rax:set-window-width',
+  HIDE_WINDOW: 'rax:hide-window',
+  WINDOW_SHOWN: 'rax:window-shown',
+  SET_IGNORE_MOUSE_EVENTS: 'rax:set-ignore-mouse-events',
+  START_WINDOW_DRAG: 'rax:start-window-drag',
+  RESET_WINDOW_POSITION: 'rax:reset-window-position',
+  IS_VISIBLE: 'rax:is-visible',
+
+  // Skill provisioning (main → renderer)
+  SKILL_STATUS: 'rax:skill-status',
+
+  // Theme
+  GET_THEME: 'rax:get-theme',
+  THEME_CHANGED: 'rax:theme-changed',
+
+  // Marketplace
+  MARKETPLACE_FETCH: 'rax:marketplace-fetch',
+  MARKETPLACE_INSTALLED: 'rax:marketplace-installed',
+  MARKETPLACE_INSTALL: 'rax:marketplace-install',
+  MARKETPLACE_UNINSTALL: 'rax:marketplace-uninstall',
+
+  // Permission mode
+  SET_PERMISSION_MODE: 'rax:set-permission-mode',
+
+  // Retroactively allow tools denied during a prior run (session-scoped)
+  ALLOW_DENIED_TOOLS: 'rax:allow-denied-tools',
+
+  // Code Mode (live preview of the active tab's working directory)
+  CODE_MODE_START: 'rax:code-mode-start',
+  CODE_MODE_STOP: 'rax:code-mode-stop',
+  CODE_MODE_STATUS: 'rax:code-mode-status',
+  CODE_MODE_RELOAD: 'rax:code-mode-reload',
+  CODE_MODE_TOGGLE_INSPECT: 'rax:code-mode-toggle-inspect',
+  CODE_MODE_SET_DEVICE: 'rax:code-mode-set-device',
+  CODE_MODE_GET_INITIAL: 'rax:code-mode-get-initial',
+  CODE_MODE_WEBVIEW_REGISTER: 'rax:code-mode-webview-register',
+  CODE_MODE_STATUS_CHANGED: 'rax:code-mode-status-changed',
+  CODE_MODE_LOG: 'rax:code-mode-log',
+
+  // Fullscreen window (standard Mac window, sidebar layout, mutually exclusive with pill)
+  FULLSCREEN_OPEN: 'rax:fullscreen-open',
+  FULLSCREEN_CLOSE: 'rax:fullscreen-close',
+  FULLSCREEN_TOGGLE: 'rax:fullscreen-toggle',
+  FULLSCREEN_IS_OPEN: 'rax:fullscreen-is-open',
+  FULLSCREEN_MODE_CHANGED: 'rax:fullscreen-mode-changed',
+  // macOS native fullscreen state for the fullscreen BrowserWindow itself
+  // (traffic lights hide → controls slide to the edge)
+  FULLSCREEN_NATIVE_STATE: 'rax:fullscreen-native-state',
+
+  // State mirror — sync optimistic-only mutations across pill ↔ fullscreen renderers
+  STATE_MIRROR_PUBLISH: 'rax:state-mirror-publish',
+  STATE_MIRROR_SUBSCRIBE: 'rax:state-mirror-subscribe',
+  STATE_SNAPSHOT_PUSH: 'rax:state-snapshot-push',
+  STATE_SNAPSHOT_PULL: 'rax:state-snapshot-pull',
+
+  // Voice orb — Siri-style floating voice agent that runs its own claude session
+  ORB_TOGGLE: 'rax:orb-toggle',
+  ORB_SHOW: 'rax:orb-show',
+  ORB_HIDE: 'rax:orb-hide',
+  ORB_SUBMIT_TURN: 'rax:orb-submit-turn',
+  ORB_CANCEL_TURN: 'rax:orb-cancel-turn',
+  ORB_RESET_SESSION: 'rax:orb-reset-session',
+  ORB_EVENT: 'rax:orb-event',
+  ORB_DISMISSED: 'rax:orb-dismissed',
+  ORB_FORCE_LISTEN: 'rax:orb-force-listen',
+  ORB_HOLD_START: 'rax:orb-hold-start',
+  ORB_HOLD_END: 'rax:orb-hold-end',
+  ORB_SET_POSITION: 'rax:orb-set-position',
+  ORB_TTS_SPEAK: 'rax:orb-tts-speak',
+  ORB_TTS_CANCEL: 'rax:orb-tts-cancel',
+  ORB_TTS_DONE: 'rax:orb-tts-done',
+  /** Renderer→main invoke. Payload is a Kokoro voice id (e.g. `af_heart`).
+   *  Main updates the live TTSManager and persists the choice to
+   *  `<userData>/orb-tts-voice.json`. Returns `{ ok, voice }`; `ok=false`
+   *  if the id isn't in the known catalog. */
+  ORB_TTS_SET_VOICE: 'rax:orb-tts-set-voice',
+  /** Renderer→main invoke, no payload. Returns the currently-active
+   *  Kokoro voice id so the Settings dropdown can render the right
+   *  initial selection on mount (instead of guessing from localStorage,
+   *  which can disagree with the persisted main-process state after the
+   *  user uninstalls + reinstalls). */
+  ORB_TTS_GET_VOICE: 'rax:orb-tts-get-voice',
+  ORB_RENDERER_READY: 'rax:orb-renderer-ready',
+  ORB_BUSY: 'rax:orb-busy',
+  /** Renderer→main, fire-and-forget. Payload is the orb's current voice
+   *  state ('idle' | 'listening' | 'transcribing' | 'thinking' | 'talking' |
+   *  'error'). Main re-emits it to the caption-pill window so the pill can
+   *  drive visibility off real speaking state instead of guessing from
+   *  task_complete + a hide timer. */
+  ORB_VOICE_STATE: 'rax:orb-voice-state',
+  /** Same orb stream event the orb window already receives, also broadcast
+   *  to pill + fullscreen so they can populate the dedicated voice tab. */
+  ORB_EVENT_BROADCAST: 'rax:orb-event-broadcast',
+  /** Fired when the orb conversation is reset — pill + fullscreen insert a
+   *  divider into the orb tab so the user can scroll back through old
+   *  conversations. */
+  ORB_RESET_BROADCAST: 'rax:orb-reset-broadcast',
+  /** Forwarded orb stream event sent to the standalone caption-pill window —
+   *  the bottom-of-screen "what was just said / what's being said" subtitle.
+   *  Same payload shape as ORB_EVENT. */
+  CAPTION_PILL_EVENT: 'rax:caption-pill-event',
+  STATE_SNAPSHOT_REQUEST: 'rax:state-snapshot-request',
+
+  // Claude instance — which `claude` Rax talks to (bundled vs system).
+  // GET/SET are renderer→main invokes; INFO returns full instance details
+  // (binary path, version, auth, mcp list, sign-in state) for Settings.
+  // CHANGED is the broadcast main→renderer when the mode flips.
+  // LOGIN/LOGIN_CANCEL/LOGIN_EVENT run `claude login` in an embedded panel.
+  CLAUDE_MODE_GET: 'rax:claude-mode-get',
+  CLAUDE_MODE_SET: 'rax:claude-mode-set',
+  CLAUDE_MODE_INFO: 'rax:claude-mode-info',
+  CLAUDE_MODE_CHANGED: 'rax:claude-mode-changed',
+  CLAUDE_LOGIN_START: 'rax:claude-login-start',
+  CLAUDE_LOGIN_CANCEL: 'rax:claude-login-cancel',
+  CLAUDE_LOGIN_EVENT: 'rax:claude-login-event',
+
+  // Rax cloud — routes the spawned `claude` CLI through the hosted Rax
+  // proxy so the user is billed against their Rax credit balance instead
+  // of needing their own Anthropic key.
+  // STATUS  → { enabled, signedIn, baseUrl, keyPrefix? }
+  // SIGN_IN → opens browser to the loopback OAuth flow; resolves after the
+  //           user completes the web sign-in or rejects with a reason.
+  // SIGN_OUT clears the locally stored key.
+  // SET_ENABLED toggles the env-injection without revoking the key.
+  RAX_AUTH_STATUS: 'rax:rax-auth-status',
+  RAX_AUTH_SIGN_IN: 'rax:rax-auth-sign-in',
+  RAX_AUTH_SIGN_OUT: 'rax:rax-auth-sign-out',
+  RAX_AUTH_SET_ENABLED: 'rax:rax-auth-set-enabled',
+  RAX_AUTH_CHANGED: 'rax:rax-auth-changed',
+  /** Renderer→main invoke. Calls `${baseUrl}/api/me` with the stored key
+   *  and returns a RaxAccountInfo snapshot (email + balance_cents). */
+  RAX_AUTH_FETCH_ACCOUNT: 'rax:rax-auth-fetch-account',
+
+  /** First-launch onboarding: returns whether the user has already seen
+   *  + dismissed the welcome screen. Persisted in <userData>/onboarding.json. */
+  ONBOARDING_GET: 'rax:onboarding-get',
+  ONBOARDING_COMPLETE: 'rax:onboarding-complete',
+  /** Open the welcome BrowserWindow (idempotent — focuses if already open). */
+  WELCOME_OPEN: 'rax:welcome-open',
+  /** Close the welcome BrowserWindow from the welcome renderer itself. */
+  WELCOME_CLOSE: 'rax:welcome-close',
+  /** Finish onboarding: create the pill (if not already created), show it,
+   *  and close the welcome window. Called from the success screen's
+   *  "Launch Rax" button. */
+  LAUNCH_PILL: 'rax:launch-pill',
+
+  // ─── Agent dock ───
+  // Standalone always-on-top vertical dock on the left edge of the user's
+  // primary display. Hosts the five agent icons (Max/Alex/Luna/Nova/Zara) +
+  // status indicators + completion toasts. Lifecycle is independent of the
+  // pill / fullscreen / orb windows.
+  DOCK_TOGGLE: 'rax:dock-toggle',
+  DOCK_SHOW: 'rax:dock-show',
+  DOCK_HIDE: 'rax:dock-hide',
+  /** Renderer (dock) → main. User clicked an agent icon in the dock. Main
+   *  forwards as a tab-selected mirror so pill + fullscreen update their
+   *  active tab, then surfaces the pill / fullscreen window if hidden. */
+  DOCK_SELECT_AGENT: 'rax:dock-select-agent',
+  /** Renderer (dock) → main, fire-and-forget. Dock saved its new on-screen
+   *  position. Mirrors the orb's setBounds + persist-on-moved pattern. */
+  DOCK_SET_POSITION: 'rax:dock-set-position',
+  /** Main → dock renderer. Broadcast on every task_complete event so the
+   *  dock can fire a toast notification independently of pill / fullscreen. */
+  DOCK_AGENT_COMPLETED: 'rax:dock-agent-completed',
+
+  // ─── Auto-updater ───
+  // Backed by `electron-updater` reading `latest-mac.yml` from the GitHub
+  // release configured in package.json `build.publish`. The renderer drives
+  // checks from the Settings "About" panel; the main process also runs a
+  // silent background check shortly after boot + every 6 hours.
+  /** Renderer→main invoke. Triggers a check; returns the new status snapshot.
+   *  Payload `{ userInitiated: true }` makes failures + "up to date" surface
+   *  as native dialogs; background checks pass `false` and stay silent. */
+  UPDATER_CHECK: 'rax:updater-check',
+  /** Renderer→main invoke. Starts downloading the available update. No-op
+   *  if no update is currently available. */
+  UPDATER_DOWNLOAD: 'rax:updater-download',
+  /** Renderer→main send. Quits the app and runs the downloaded installer,
+   *  then relaunches. */
+  UPDATER_INSTALL: 'rax:updater-install',
+  /** Renderer→main invoke. Returns the most recent UpdaterStatus snapshot
+   *  without forcing a check (use UPDATER_CHECK to actively poll). */
+  UPDATER_GET_STATUS: 'rax:updater-get-status',
+  /** Main→renderer broadcast. Fires whenever the updater transitions
+   *  (checking → available → downloading → downloaded / error). */
+  UPDATER_STATUS: 'rax:updater-status',
+
+  // Legacy (kept for backward compat during migration)
+  STREAM_EVENT: 'rax:stream-event',
+  RUN_COMPLETE: 'rax:run-complete',
+  RUN_ERROR: 'rax:run-error',
+} as const
+
+export type ClaudeMode = 'bundled' | 'system'
+
+export interface ClaudeInstanceInfo {
+  mode: ClaudeMode
+  label: string
+  homeDescription: string
+  binaryPath: string
+  available: boolean
+  unavailableReason?: string | null
+  version: string | null
+  /** Login state surfaced by `claude auth status`. Null when the CLI is
+   *  unavailable; otherwise an object with at minimum `signedIn`. Modern CLI
+   *  ships `loggedIn`/`authMethod`/`apiProvider`; older CLI versions return
+   *  `email`/`subscriptionType` instead — we normalize into `signedIn` so the
+   *  renderer doesn't have to know about either shape. */
+  auth: {
+    signedIn: boolean
+    email?: string
+    subscriptionType?: string
+    authMethod?: string
+    apiProvider?: string
+  } | null
+  mcpServers: string[]
+}
+
+/** Rax cloud auth state surfaced to the renderer. */
+export interface RaxAuthStatus {
+  /** True when env-injection is active and a key is present. */
+  enabled: boolean
+  /** True when a key is stored locally (regardless of `enabled`). */
+  signedIn: boolean
+  /** First 12 chars of the active key (e.g. `rax_sk_AbCd`), for display only. */
+  keyPrefix: string | null
+  /** Base URL the CLI is pointed at when rax-mode is on. */
+  baseUrl: string
+}
+
+/** Live account info pulled from the Rax /api/me endpoint. Null fields
+ *  when the user is not signed in or the fetch failed. */
+export interface RaxAccountInfo {
+  email: string | null
+  balanceCents: number | null
+  /** ISO timestamp of when this snapshot was fetched. */
+  fetchedAt: string | null
+  /** True when the last fetch errored (network / 401 / 5xx). */
+  error: string | null
+}
+
+/** Stream of events from a running `claude login` flow. */
+export type ClaudeLoginEvent =
+  | { kind: 'output'; text: string }
+  | { kind: 'url'; url: string }
+  | { kind: 'exit'; code: number | null; signedIn: boolean }
+  | { kind: 'error'; message: string }
+
+/** State of the auto-updater pipeline. Drives the Settings "Check for
+ *  updates" UI + tray menu badge. Kept in sync via `UPDATER_STATUS`
+ *  broadcasts; UI state should mirror this rather than tracking its own
+ *  parallel copy. */
+export type UpdaterPhase =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error'
+  | 'unsupported'
+
+export interface UpdaterStatus {
+  phase: UpdaterPhase
+  currentVersion: string
+  availableVersion?: string
+  releaseNotes?: string
+  releaseUrl?: string
+  downloadPercent?: number
+  bytesPerSecond?: number
+  transferred?: number
+  total?: number
+  error?: string
+  /** True when the most recent check came from a user button click rather
+   *  than the background timer. The Settings UI uses this to decide whether
+   *  to highlight "no updates" or stay quiet. */
+  userInitiated?: boolean
+}
+
+// ─── Code Mode ───
+
+export type CodeModeStatus = 'idle' | 'detecting' | 'starting' | 'ready' | 'error' | 'stopping'
+
+export type DeviceMode = 'mobile' | 'tablet' | 'desktop'
+
+export interface DetectedProject {
+  kind:
+    | 'next'
+    | 'vite'
+    | 'cra'
+    | 'angular'
+    | 'nuxt'
+    | 'sveltekit'
+    | 'astro'
+    | 'electron'
+    | 'node-script'
+    | 'static-html'
+    | 'unknown'
+  label: string
+  command: string
+  args: string[]
+  /** Best-guess port if stdout parsing fails */
+  fallbackPort: number
+  /** Some frameworks honour PORT env override */
+  honorsPortEnv: boolean
+}
+
+export interface CodeModeState {
+  status: CodeModeStatus
+  projectPath: string | null
+  project: DetectedProject | null
+  url: string | null
+  error: string | null
+  device: DeviceMode
+  inspecting: boolean
+}

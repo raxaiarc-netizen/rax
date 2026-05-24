@@ -1,0 +1,135 @@
+{
+  "name": "rax",
+  "version": "1.0.0",
+  "description": "Rax — Command Line User Interface for Claude Code",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/raxaiarc-netizen/rax.git"
+  },
+  "bugs": {
+    "url": "https://github.com/raxaiarc-netizen/rax/issues"
+  },
+  "homepage": "https://github.com/raxaiarc-netizen/rax#readme",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "electron-vite build --mode production && electron-builder --mac",
+    "publish": "electron-vite build --mode production && electron-builder --mac --publish always",
+    "doctor": "bash scripts/doctor.sh",
+    "vendor-claude": "bash scripts/vendor-claude.sh",
+    "vendor-whisper": "bash scripts/vendor-whisper.sh",
+    "vendor-kokoro": "bash scripts/vendor-kokoro.sh",
+    "preview-voices": "node scripts/preview-voices.mjs",
+    "vendor-all": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh",
+    "prebuild": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh",
+    "predist": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh",
+    "postinstall": "electron-builder install-app-deps && bash scripts/patch-dev-icon.sh && (bash scripts/vendor-claude.sh || true) && (bash scripts/vendor-whisper.sh || true) && (bash scripts/vendor-kokoro.sh || true)"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.96.0",
+    "@huggingface/transformers": "^3.8.1",
+    "@phosphor-icons/react": "^2.1.10",
+    "electron-updater": "^6.3.9",
+    "framer-motion": "^12.35.1",
+    "kokoro-js": "^1.2.1",
+    "node-pty": "^1.1.0",
+    "onnxruntime-node": "^1.21.0",
+    "react-markdown": "^9.0.0",
+    "remark-gfm": "^4.0.0",
+    "zustand": "^5.0.0"
+  },
+  "build": {
+    "appId": "com.rax.app",
+    "productName": "Rax",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/renderer/**/*",
+      "resources/**/*",
+      "!resources/claude-cli/**/*",
+      "!resources/whisper/**/*",
+      "!resources/kokoro-cache/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/claude-cli",
+        "to": "claude-cli",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/whisper",
+        "to": "whisper",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/kokoro-cache",
+        "to": "kokoro-cache",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "icon": "resources/icon.icns",
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.plist",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "identity": "Developer ID Application: Chirag Panchal (VYC8NBAQU5)",
+      "notarize": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Rax uses your microphone to transcribe voice input locally with Whisper.",
+        "NSAppleEventsUsageDescription": "Rax's voice agent uses Apple Events to drive the cursor and keyboard so it can act on what you ask it to do."
+      }
+    },
+    "dmg": {
+      "title": "Rax ${version}",
+      "writeUpdateInfo": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "raxaiarc-netizen",
+        "repo": "rax",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.0",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.8.1",
+    "electron-vite": "^3.0.0",
+    "postcss": "^8.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}

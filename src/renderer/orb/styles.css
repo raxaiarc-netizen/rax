@@ -1,0 +1,152 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: transparent;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+.orb-page {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  overflow: hidden;
+}
+
+.orb-tap {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  outline: none;
+  border-radius: 50%;
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.orb-tap:focus-visible {
+  outline: none;
+}
+.orb-tap:active {
+  transform: scale(0.97);
+}
+
+/* ─── Floating UI overlays (status label, error, transcript) ─── */
+.orb-overlay {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif;
+  pointer-events: none;
+}
+
+.state-label {
+  bottom: 18px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(245, 245, 250, 0.8);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.55), 0 0 12px rgba(0, 0, 0, 0.7);
+  opacity: 0;
+  animation: state-label-in 0.18s ease-out forwards, state-label-out 0.4s 1.6s ease-in forwards;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Live-tool caption: fade in but DON'T auto fade out — React unmount controls
+   visibility so long tool calls stay legible. */
+.state-label.persistent {
+  animation: state-label-in 0.18s ease-out forwards;
+  color: rgba(220, 230, 255, 0.92);
+}
+@keyframes state-label-in {
+  from { opacity: 0; transform: translate(-50%, 4px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes state-label-out {
+  to { opacity: 0; }
+}
+
+.orb-error {
+  top: 12px;
+  max-width: 92%;
+  pointer-events: auto;
+  background: rgba(40, 8, 14, 0.86);
+  color: #ffd5dc;
+  border: 1px solid rgba(255, 100, 130, 0.35);
+  padding: 6px 10px 6px 12px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.orb-error button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.7;
+}
+.orb-error button:hover { opacity: 1; }
+
+.orb-transcript {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 12px;
+  width: 280px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: rgba(8, 6, 14, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: rgba(245, 245, 250, 0.9);
+  line-height: 1.45;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  pointer-events: auto;
+}
+.orb-transcript::-webkit-scrollbar { width: 4px; }
+.orb-transcript::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 4px; }
+.orb-transcript .turn { margin-bottom: 8px; }
+.orb-transcript .turn:last-child { margin-bottom: 0; }
+.orb-transcript .role {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  opacity: 0.55;
+  margin-bottom: 2px;
+}
+.orb-transcript .role.user { color: rgba(180, 220, 255, 0.85); }
+.orb-transcript .role.orb  { color: rgba(255, 180, 220, 0.85); }
+.orb-transcript .role.tool { color: rgba(200, 200, 200, 0.6); }

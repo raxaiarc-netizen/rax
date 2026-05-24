@@ -1,0 +1,168 @@
+.rax-welcome-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  animation: rax-welcome-fade 240ms ease-out both;
+}
+@keyframes rax-welcome-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.rax-welcome-card {
+  width: min(640px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 36px 36px 28px;
+  border-radius: 18px;
+  background: var(--fs-surface, #0f0f10);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  animation: rax-welcome-lift 320ms cubic-bezier(0.2, 0.9, 0.2, 1.05) both;
+}
+@keyframes rax-welcome-lift {
+  from { transform: translateY(16px) scale(0.985); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+
+.rax-welcome-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fs-accent, #a78bfa);
+  margin-bottom: 8px;
+}
+.rax-welcome-title {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  color: var(--fs-text, #f5f5f5);
+}
+.rax-welcome-sub {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--fs-text-muted, #a3a3a3);
+}
+
+.rax-welcome-choices {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-top: 26px;
+}
+@media (min-width: 720px) {
+  .rax-welcome-choices {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.rax-choice {
+  text-align: left;
+  padding: 18px 18px 16px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.rax-choice:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.14);
+  transform: translateY(-1px);
+}
+.rax-choice:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.rax-choice.is-recommended {
+  border-color: color-mix(in srgb, var(--fs-accent, #a78bfa) 38%, transparent);
+  background: color-mix(in srgb, var(--fs-accent, #a78bfa) 6%, rgba(255, 255, 255, 0.02));
+}
+.rax-choice.is-recommended:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--fs-accent, #a78bfa) 55%, transparent);
+  background: color-mix(in srgb, var(--fs-accent, #a78bfa) 10%, rgba(255, 255, 255, 0.03));
+}
+
+.rax-choice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.rax-choice-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fs-text, #f5f5f5);
+}
+.rax-choice-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fs-accent, #a78bfa);
+  background: color-mix(in srgb, var(--fs-accent, #a78bfa) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fs-accent, #a78bfa) 32%, transparent);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+.rax-choice-blurb {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fs-text-muted, #b3b3b3);
+}
+.rax-choice-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fs-text, #f5f5f5);
+  padding-top: 6px;
+}
+.rax-choice-cta.is-primary {
+  color: var(--fs-accent, #a78bfa);
+}
+
+.rax-welcome-footer {
+  margin-top: 24px;
+  text-align: center;
+}
+.rax-welcome-skip {
+  font-size: 13px;
+  color: var(--fs-text-muted, #888);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+.rax-welcome-skip:hover:not(:disabled) {
+  color: var(--fs-text, #f5f5f5);
+}
+.rax-welcome-skip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rax-welcome-error {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #dc2626 14%, transparent);
+  border: 1px solid color-mix(in srgb, #dc2626 30%, transparent);
+  color: #f87171;
+  font-size: 12.5px;
+}

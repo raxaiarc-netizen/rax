@@ -1,0 +1,65 @@
+# Build output
+node_modules/
+dist/
+out/
+build/
+release/
+*.tsbuildinfo
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / tool local state
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code project-scoped local settings
+.claude/settings.local.json
+
+# Environment — never commit real secrets. Examples / templates are OK.
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+~/.rax-debug.log
+
+# Runtime
+.rax.pid
+
+# Temporary files
+*.tmp
+*.bak
+
+# Vendored binaries — fetched on `npm install` by scripts/vendor-*.sh.
+# Keep the .vendored-version sentinel so scripts know whether to skip.
+resources/claude-cli/**
+!resources/claude-cli/.vendored-version
+resources/whisper/**
+!resources/whisper/.vendored-version
+resources/kokoro-cache/**
+!resources/kokoro-cache/.vendored-version
+
+# Ad-hoc playground / demo artifacts that shouldn't ship in the repo
+codex-analysis/
+insta/
+slides/
+todo-app/
+voice-previews/
+counter-app.html
+youtube-site.html
+
+# Memory + agent runtime state
+memory/
+
+# Built rax-web bundles
+rax-web/.next/
+rax-web/out/
+rax-web/.vercel/

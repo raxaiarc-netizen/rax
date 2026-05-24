@@ -1,0 +1,126 @@
+/* Poppins — geometric humanist sans, requested for the caption pill.
+   Loaded from Google Fonts at startup; if the network is offline the @font-
+   face falls through to the system stack listed in `.cp-pill { font-family }`. */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+
+* { box-sizing: border-box; }
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: transparent;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+.cp-page {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+
+/* ─── The pill ───
+   Single-line karaoke caption. Apple-default rounded-rectangle corner radius
+   (16px) — sits in the same family as macOS notification banners and toast
+   surfaces, rather than a full capsule. Auto-height with a min so the box
+   doesn't squash on shorter fonts. Fully click-through. */
+.cp-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: calc(100vw - 32px);
+  min-height: 46px;
+  padding: 8px 20px;
+  border-radius: 16px;
+  background: rgba(32, 32, 30, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(44px) saturate(180%);
+  -webkit-backdrop-filter: blur(44px) saturate(180%);
+  font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif;
+  color: #f0ede4;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.14s cubic-bezier(0.2, 0.8, 0.2, 1),
+              transform 0.14s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.cp-pill.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.cp-pill:not(.is-visible) {
+  transition: opacity 0.30s cubic-bezier(0.2, 0.8, 0.2, 1),
+              transform 0.30s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* ─── Karaoke text ─── */
+.cp-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 720px;
+  font-size: 14.5px;
+  font-weight: 500;
+  letter-spacing: 0.005em;
+  line-height: 1.32;
+  /* Single-line caption. The JS-side sliding word window keeps the active
+     word inside the visible slice — text-overflow ellipsis handles the
+     trailing edge when even the trimmed slice overflows the max-width. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Each word is an inline span — color + weight transitions smoothly so the
+   active-word change feels like a sweep rather than a hard flip. */
+.cp-word {
+  display: inline;
+  transition:
+    color 0.14s cubic-bezier(0.2, 0.8, 0.2, 1),
+    text-shadow 0.14s cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 0.14s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* ALREADY-spoken: fully legible warm-white, slight dim relative to the
+   active word. Maintains readability so the user can scan back over what
+   was just said. */
+.cp-word--spoken {
+  color: rgba(240, 237, 228, 0.82);
+}
+
+/* THE active word — what the orb is saying right now. Bright blue accent
+   matching the orb's identity, weighted up a notch, with a soft glow. */
+.cp-word--active {
+  color: #ddeaff;
+  font-weight: 700;
+  text-shadow:
+    0 0 12px rgba(122, 167, 255, 0.6),
+    0 0 24px rgba(122, 167, 255, 0.25);
+}
+
+/* UPCOMING words — dimmer, signalling "more is coming" without competing
+   for attention. */
+.cp-word--upcoming {
+  color: rgba(240, 237, 228, 0.42);
+}
+
+/* The leading / trailing "…" markers for sentences that overflow the
+   sliding word window — same warm grey, no emphasis. */
+.cp-ellipsis {
+  color: rgba(240, 237, 228, 0.4) !important;
+  font-weight: 500;
+  text-shadow: none;
+}

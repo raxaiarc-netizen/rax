@@ -1,0 +1,444 @@
+/* ─── Agent dock — vertical glass dock on the left edge of the screen ─── */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter Display', 'Inter', system-ui, sans-serif;
+  color: #fff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.dock-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+/* ─── The glass column ─── */
+.dock-column {
+  position: relative;
+  margin-left: 6px;
+  padding: 12px 0 14px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-radius: 26px;
+  border: 1px solid transparent;
+  backdrop-filter: blur(34px) saturate(170%);
+  -webkit-backdrop-filter: blur(34px) saturate(170%);
+  cursor: grab;
+  animation: dock-enter 380ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+  /* DON'T clip — magnified icons need to overflow the column horizontally
+     when they grow + tilt. The visual shadow + glass surface stay within
+     the rounded rect because they live on this element; child icons can
+     poke outward. */
+  overflow: visible;
+}
+
+.dock-column:active {
+  cursor: grabbing;
+}
+
+/* Inner highlight at the top — gives the glass a lit-from-above sheen. */
+.dock-column-highlight {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(120% 60% at 50% -10%, rgba(255, 255, 255, 0.16), transparent 70%);
+  z-index: 0;
+}
+
+/* The animated active-pill that slides between agent slots. Positioned by
+   inline `top` from the renderer (calculated from active index + pitch). */
+.dock-active-pill {
+  position: absolute;
+  left: -1px;
+  width: 3px;
+  height: 28px;
+  border-radius: 2px;
+  transform: translateY(-50%);
+  transition:
+    top 320ms cubic-bezier(0.2, 0.9, 0.3, 1.1),
+    background 220ms ease,
+    box-shadow 220ms ease,
+    opacity 220ms ease;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* ─── Agent column ─── */
+.dock-agents {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 1;
+}
+
+/* ─── Per-icon slot ─── */
+.dock-icon-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  animation: dock-icon-enter 440ms cubic-bezier(0.2, 0.9, 0.3, 1.1) backwards;
+}
+.dock-agents .dock-icon-slot:nth-child(1) { animation-delay: 40ms; }
+.dock-agents .dock-icon-slot:nth-child(2) { animation-delay: 90ms; }
+.dock-agents .dock-icon-slot:nth-child(3) { animation-delay: 140ms; }
+.dock-agents .dock-icon-slot:nth-child(4) { animation-delay: 190ms; }
+.dock-agents .dock-icon-slot:nth-child(5) { animation-delay: 240ms; }
+
+@keyframes dock-icon-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-14px) scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes dock-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-34px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.dock-icon-halo {
+  position: absolute;
+  inset: -16px;
+  border-radius: 50%;
+  transition: opacity 280ms ease;
+  pointer-events: none;
+  filter: blur(10px);
+  z-index: 0;
+}
+
+/* ─── Tilt wrapper ───
+ * Owned by the App-level rAF loop — every frame, JS writes a fresh
+ * `perspective() translateZ() rotateX() rotateY() scale()` chain here based
+ * on the cursor's position inside the column.
+ *
+ * The wrapper carries the cursor-driven transform.  The inner .dock-icon
+ * button carries its own state-based transforms (active scale, click-press,
+ * running pulse) so the two layers don't collide.
+ *
+ * `will-change: transform` hints to the browser that this element will be
+ * transformed every frame so it should promote it to its own compositor
+ * layer.  Without that, you'd see a fresh paint every frame and stutter.
+ *
+ * `transform-origin: center` keeps the tilt natural — the icon rotates
+ * around its own center rather than the top-left.
+ */
+.dock-icon-tilt {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  transform-origin: center center;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+
+/* ─── The icon button itself ─── */
+.dock-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid;
+  /* Squircle radius — 18px gives a slightly squarer corner that reads as
+     a macOS app icon at 56px. */
+  border-radius: 18px;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  /* Fallback while the mascot PNG decodes so the squircle doesn't flash
+     transparent over the glass column. */
+  background: #0e0e12;
+  overflow: hidden;
+  transition:
+    border-color 220ms ease,
+    box-shadow 220ms ease;
+  /* Layered drop shadow + glass-style inset highlight so the icons read
+     as actual macOS-style "app icons" rather than flat squares. */
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.28),
+    0 2px 6px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.24);
+}
+
+/* Mascot art fills the squircle. The PNGs are 1080×1080 with the
+   character centered on a dark canvas; cover crops a touch on each side
+   at 56px while keeping the character's proportions intact. */
+.dock-icon-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Pressed feedback — the only state-transform we still want on the button.
+   Hover scale was removed because the tilt wrapper already drives a smooth
+   cursor-proximity magnification. */
+.dock-icon:active {
+  transform: scale(0.94);
+  transition: transform 80ms ease;
+}
+
+.dock-icon.is-active {
+  box-shadow:
+    0 8px 26px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.30);
+}
+
+/* ─── Running beam ───
+ * Sibling of the .dock-icon button (inside the tilt wrapper) so the glow can
+ * escape the button's overflow:hidden clip. Two stacked rects on the same
+ * squircle path: a dim "rail" outlining the full perimeter, and a bright
+ * "head" with a stroke-dasharray gap that travels around it. Stroke colour
+ * comes from `color: <accent>` set inline so the same animation works for
+ * every agent. */
+.dock-icon-beam {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  /* Glow filter extends well beyond the stroke; let it escape the SVG box. */
+  overflow: visible;
+  /* Sits over the icon image but under the corner status pip (z-index 3) so a
+     beam sweeping past the bottom-right corner can't obscure that dot. */
+  z-index: 2;
+}
+
+.dock-icon-beam-rail {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-opacity: 0.20;
+}
+
+.dock-icon-beam-head {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  /* pathLength=100 normalises the perimeter so the dasharray reads as
+     percentages: 22% bright dash, 78% gap. The head animates from offset
+     0 to -100 to traverse the squircle exactly once per cycle. */
+  stroke-dasharray: 22 78;
+  filter:
+    drop-shadow(0 0 2px currentColor)
+    drop-shadow(0 0 6px currentColor)
+    drop-shadow(0 0 12px currentColor);
+  animation: dock-beam-travel 1.6s linear infinite;
+}
+
+@keyframes dock-beam-travel {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -100; }
+}
+
+/* SVG accent arc rendered over the icon when active */
+.dock-icon-active-arc {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* ─── Tooltip (hover label) ─── */
+.dock-tooltip {
+  position: absolute;
+  left: calc(100% + 22px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 10px 16px;
+  border: 1px solid;
+  border-radius: 14px;
+  white-space: nowrap;
+  z-index: 5;
+  pointer-events: none;
+  font-size: 13px;
+  box-shadow:
+    0 16px 36px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  animation: dock-tooltip-enter 200ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+@keyframes dock-tooltip-enter {
+  from { opacity: 0; transform: translate(-8px, -50%); }
+  to   { opacity: 1; transform: translate(0,   -50%); }
+}
+
+.dock-tooltip-name {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: -0.005em;
+}
+
+.dock-tooltip-tagline {
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: -0.002em;
+}
+
+.dock-tooltip-arrow {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0;
+  height: 0;
+  border: 6px solid transparent;
+  border-right-width: 7px;
+  border-left: 0;
+}
+
+/* ─── Toast stack ─── */
+.dock-toast-stack {
+  position: absolute;
+  left: 102px;
+  top: 20px;
+  width: 230px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.dock-toast {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 30px 11px 14px;
+  border: 1px solid;
+  border-radius: 14px;
+  font-size: 12.5px;
+  line-height: 1.35;
+  cursor: pointer;
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  pointer-events: auto;
+  animation: dock-toast-enter 340ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+@keyframes dock-toast-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-22px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.dock-toast-accent {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 6px;
+}
+
+.dock-toast-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.dock-toast-title {
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.dock-toast-title strong {
+  font-weight: 700;
+}
+
+.dock-toast-summary {
+  margin-top: 3px;
+  font-size: 11.5px;
+  font-weight: 400;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.dock-toast-dismiss {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.4;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  transition: opacity 150ms ease, background 150ms ease;
+}
+
+.dock-toast-dismiss:hover {
+  opacity: 1;
+  background: rgba(127, 127, 127, 0.18);
+}
+
+/* Respect reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .dock-icon-beam-head {
+    animation: none;
+    /* Freeze the head as a static glow segment at the top of the squircle so
+       users still get a colour cue that the agent is working. */
+    stroke-dashoffset: -75;
+  }
+  .dock-icon-tilt {
+    /* If the user prefers reduced motion we leave the inline transform from
+       the rAF loop intact (it's user-driven, not auto-playing), but disable
+       the magnification effect would require disabling the loop entirely.
+       The JS layer doesn't read this media query — we just keep the CSS
+       state-based transforms tame so nothing oscillates by itself. */
+  }
+}

@@ -1,0 +1,198 @@
+/* Welcome window — own BrowserWindow, normal Mac chrome. */
+.rax-welcome-window {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(1100px 600px at 50% -20%, color-mix(in srgb, var(--fs-accent, #a78bfa) 18%, transparent), transparent 60%),
+    #0c0c0e;
+  color: #f5f5f5;
+}
+
+/* Drag region aligned with the macOS traffic lights. */
+.rax-welcome-titlebar {
+  height: 38px;
+  flex: none;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.rax-welcome-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 56px 28px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.rax-welcome-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fs-accent, #a78bfa);
+  margin-bottom: 8px;
+}
+.rax-welcome-title {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  color: #f5f5f5;
+}
+.rax-welcome-sub {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #a3a3a3;
+  max-width: 560px;
+}
+
+.rax-welcome-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 28px;
+}
+@media (max-width: 720px) {
+  .rax-welcome-choices { grid-template-columns: 1fr; }
+}
+
+.rax-welcome-footer {
+  margin-top: auto;
+  padding-top: 18px;
+  display: flex;
+  justify-content: center;
+}
+
+/* The choice-card styles live in rax-welcome.css (imported by main.tsx)
+   so we share them with the in-pill version if it's ever resurrected. */
+
+/* ── In-flight login progress ───────────────────────────────────────── */
+.rax-welcome-progress {
+  margin-top: 28px;
+  padding: 22px 20px 18px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.rax-welcome-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.10);
+  border-top-color: var(--fs-accent, #a78bfa);
+  animation: rax-welcome-spin 0.9s linear infinite;
+}
+@keyframes rax-welcome-spin {
+  to { transform: rotate(360deg); }
+}
+
+.rax-welcome-progress-text {
+  font-size: 13.5px;
+  color: #d4d4d4;
+}
+
+.rax-welcome-log {
+  width: 100%;
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  color: #a3a3a3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rax-welcome-progress-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Primary CTA used in step 1 (single-button screen). */
+.rax-welcome-primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 11px 22px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--fs-accent, #a78bfa);
+  border: 1px solid color-mix(in srgb, var(--fs-accent, #a78bfa) 75%, transparent);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: transform 80ms ease, background 120ms ease;
+}
+.rax-welcome-primary-button:hover {
+  background: color-mix(in srgb, var(--fs-accent, #a78bfa) 85%, white 15%);
+}
+.rax-welcome-primary-button:active {
+  transform: translateY(1px);
+}
+.rax-welcome-primary-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rax-welcome-fineprint {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #777;
+}
+
+/* Step 3 — success / launch screen. */
+.rax-welcome-success-eyebrow {
+  color: #34d399 !important; /* emerald-400 instead of accent — signals success */
+}
+
+.rax-welcome-success-summary {
+  margin-top: 22px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rax-welcome-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.rax-welcome-summary-label {
+  color: #888;
+  letter-spacing: 0.02em;
+}
+.rax-welcome-summary-value {
+  color: #e5e5e5;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.rax-kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #d4d4d4;
+}
