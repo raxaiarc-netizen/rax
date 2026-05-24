@@ -2,6 +2,12 @@
 
 A lightweight, transparent desktop overlay for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) on macOS. Rax wraps the Claude Code CLI in a floating pill interface with multi-tab sessions, a permission approval UI, voice input, and a skills marketplace.
 
+## ⬇ Download
+
+[**Download Rax for macOS →**](https://rax-ai.com/download) — signed + notarized DMG for Apple Silicon and Intel. Auto-update is built in.
+
+Or grab the latest [`.dmg` directly from GitHub Releases](https://github.com/raxaiarc-netizen/rax/releases/latest).
+
 ## Demo
 
 [![Watch the demo](https://img.youtube.com/vi/NqRBIpaA4Fk/maxresdefault.jpg)](https://www.youtube.com/watch?v=NqRBIpaA4Fk)
@@ -42,14 +48,14 @@ The fastest way to get Rax running as a regular Mac app. This installs dependenc
 **1) Clone the repo**
 
 ```bash
-git clone https://github.com/lcoutodemos/rax.git
+git clone https://github.com/raxaiarc-netizen/rax.git
 ```
 
 **2) Double-click `install-app.command`**
 
 Open the `rax` folder in Finder and double-click `install-app.command`.
 
-> **First launch:** macOS may block the app because it's unsigned. Go to **System Settings → Privacy & Security → Open Anyway**. You only need to do this once.
+> **First launch:** The Releases DMG is signed with Developer ID + notarized by Apple, so Gatekeeper lets it through on first open. No "unidentified developer" warnings.
 > **Folder cleanup:** the installer removes temporary `dist/` and `release/` folders after a successful install to keep the repo tidy.
 
 <p align="center"><img src="docs/shortcut.png" width="520" alt="Press Option + Space to show or hide Rax" /></p>
@@ -64,7 +70,7 @@ Only `install-app.command` is kept at root intentionally for non-technical users
 ### Quick Start (Terminal)
 
 ```bash
-git clone https://github.com/lcoutodemos/rax.git
+git clone https://github.com/raxaiarc-netizen/rax.git
 ```
 
 ```bash

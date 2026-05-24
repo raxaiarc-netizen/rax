@@ -5,7 +5,7 @@
 ### Fresh Clone Bootstrap
 
 ```bash
-git clone https://github.com/lcoutodemos/rax.git
+git clone https://github.com/raxaiarc-netizen/rax.git
 cd rax
 npm run doctor     # verify environment — all checks should pass
 npm install        # installs deps + runs postinstall (electron-builder install-app-deps + icon patch)
