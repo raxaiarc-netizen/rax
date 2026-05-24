@@ -86,8 +86,8 @@
       "entitlementsInherit": "resources/entitlements.mac.plist",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
-      "identity": "Developer ID Application: Chirag Panchal (VYC8NBAQU5)",
-      "notarize": false,
+      "identity": "Chirag Panchal (VYC8NBAQU5)",
+      "notarize": true,
       "target": [
         {
           "target": "dmg",
