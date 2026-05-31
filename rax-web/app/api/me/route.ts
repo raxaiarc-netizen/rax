@@ -25,16 +25,34 @@ export async function GET(req: Request) {
   }
 
   const db = supabaseAdmin()
-  const [{ data: profile }, { data: authUser }] = await Promise.all([
+  const [{ data: profile }, { data: authUser }, { data: freeUsage }] = await Promise.all([
     db.from('profiles').select('balance_cents').eq('user_id', resolved.user_id).single(),
     db.auth.admin.getUserById(resolved.user_id),
+    db.rpc('free_usage_summary', { p_user_id: resolved.user_id }),
   ])
+
+  // Free-tier surface is percent-only — the underlying cents are never sent
+  // to the client. Keeps the "Rax Default" budget opaque to end users.
+  const usage = Array.isArray(freeUsage) ? freeUsage[0] : freeUsage
+  const dailyPct   = pctFromCents(usage?.day_cents,   usage?.day_limit_cents)
+  const monthlyPct = pctFromCents(usage?.month_cents, usage?.month_limit_cents)
 
   return NextResponse.json({
     user_id:       resolved.user_id,
     email:         authUser?.user?.email ?? null,
     balance_cents: profile?.balance_cents ?? 0,
+    free_tier: {
+      daily_pct:   dailyPct,
+      monthly_pct: monthlyPct,
+    },
   })
+}
+
+function pctFromCents(used: unknown, limit: unknown): number {
+  const u = Number(used ?? 0)
+  const l = Number(limit ?? 0)
+  if (l <= 0) return 0
+  return Math.min(100, Math.max(0, Math.round((u / l) * 100)))
 }
 
 export async function OPTIONS() {

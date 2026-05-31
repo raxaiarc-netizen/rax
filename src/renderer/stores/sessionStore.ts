@@ -20,6 +20,10 @@ export const AVAILABLE_MODELS = [
   { id: 'claude-opus-4-6', label: 'Opus 4.6' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  // Rax Default — wire id is still `kimi-k2.6` (the Moonshot model the proxy
+  // forwards to server-side). The UI label is genericized so users see this
+  // as a first-class Rax model rather than as a third-party brand.
+  { id: 'kimi-k2.6', label: 'Rax Default' },
 ] as const
 
 function normalizeModelId(modelId: string): string {

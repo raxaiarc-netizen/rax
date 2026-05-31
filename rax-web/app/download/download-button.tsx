@@ -5,8 +5,6 @@ import { useEffect, useState } from 'react'
 type Arch = 'arm64' | 'x64' | 'universal' | 'unknown'
 
 interface Props {
-  /** Server-side hint from the request UA. Used for the very first paint so
-   *  the button is correct before client-side detection runs. */
   defaultArchIsArm: boolean
   armUrl: string | null
   intelUrl: string | null
@@ -14,14 +12,8 @@ interface Props {
   version: string
 }
 
-// Detect Apple Silicon vs Intel at runtime. WebGL hack: ANGLE_instanced_arrays
-// renders different vendor strings on M-series ("Apple GPU") vs Intel
-// integrated graphics. Falls back to UA + memory heuristics when WebGL is
-// unavailable (Safari with hardware acceleration off, headless browsers).
 function detectArch(uaHint: boolean): Arch {
-  if (typeof navigator === 'undefined') {
-    return uaHint ? 'arm64' : 'unknown'
-  }
+  if (typeof navigator === 'undefined') return uaHint ? 'arm64' : 'unknown'
   const platform = (navigator.platform || '').toLowerCase()
   if (!platform.includes('mac')) return 'unknown'
 
@@ -37,16 +29,12 @@ function detectArch(uaHint: boolean): Arch {
       }
     }
   } catch {
-    // ignore — fall through to UA heuristic
+    // fall through
   }
 
-  // CPU cores ≥ 8 on a Mac is much more common on Apple Silicon than
-  // pre-2021 Intel models. Combined with the UA hint this is a decent
-  // tiebreaker when WebGL is locked down.
   const cores = navigator.hardwareConcurrency ?? 0
   if (uaHint && cores >= 8) return 'arm64'
   if (cores <= 4) return 'x64'
-
   return uaHint ? 'arm64' : 'x64'
 }
 
@@ -71,10 +59,10 @@ export default function DownloadButton({
 
   const archLabel = (() => {
     switch (arch) {
-      case 'arm64': return 'Apple Silicon · M1/M2/M3/M4'
-      case 'x64': return 'Intel · x86_64'
+      case 'arm64':     return 'Apple Silicon · M1/M2/M3/M4'
+      case 'x64':       return 'Intel · x86_64'
       case 'universal': return 'Universal'
-      default: return 'macOS'
+      default:          return 'macOS'
     }
   })()
 
@@ -82,9 +70,10 @@ export default function DownloadButton({
     return (
       <button
         disabled
-        className="w-full rounded-xl bg-neutral-900 text-neutral-500 py-4 text-sm font-medium cursor-not-allowed"
+        className="w-full rounded-2xl border border-line-2 bg-surface2 text-muted py-4 text-[14px] font-medium cursor-not-allowed flex flex-col items-center gap-1"
       >
-        Download unavailable — no release found
+        <span className="font-mono text-[10.5px] tracking-[0.22em] uppercase text-soft">// unavailable</span>
+        <span>no release found</span>
       </button>
     )
   }
@@ -92,16 +81,42 @@ export default function DownloadButton({
   return (
     <a
       href={primaryUrl}
-      className="group block w-full rounded-xl bg-white text-black py-4 px-5 text-center transition-transform hover:scale-[1.01] active:scale-[0.99]"
+      className="group relative block w-full overflow-hidden rounded-2xl bg-lime text-white py-4 px-5 transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0"
+      style={{
+        boxShadow:
+          '0 14px 38px -14px rgba(30, 63, 196, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.25)',
+        border: '1px solid var(--lime-deep)',
+      }}
     >
-      <div className="flex items-center justify-center gap-3">
-        <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
-          <path d="M17.05 11.97a4.78 4.78 0 0 1 2.28-4.01 4.9 4.9 0 0 0-3.86-2.09c-1.62-.16-3.18 1-4 1-.84 0-2.1-.97-3.46-.95a5.16 5.16 0 0 0-4.34 2.65c-1.86 3.22-.47 7.99 1.34 10.6.88 1.28 1.93 2.72 3.31 2.67 1.33-.05 1.84-.86 3.45-.86 1.6 0 2.07.86 3.48.83 1.44-.02 2.35-1.3 3.23-2.59a11.5 11.5 0 0 0 1.46-3.02 4.65 4.65 0 0 1-2.89-4.23zM14.6 4.5A4.7 4.7 0 0 0 15.7 1a4.78 4.78 0 0 0-3.07 1.59 4.4 4.4 0 0 0-1.13 3.36 3.95 3.95 0 0 0 3.1-1.45z" />
-        </svg>
-        <span className="text-base font-semibold">Download Rax v{version}</span>
-      </div>
-      <div className="mt-1 text-xs text-neutral-600 group-hover:text-neutral-700 transition-colors">
-        macOS · {archLabel}
+      {/* shimmer sweep */}
+      <span
+        aria-hidden
+        className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 ease-out"
+        style={{
+          background:
+            'linear-gradient(110deg, transparent 30%, rgba(255,255,255,0.45) 50%, transparent 70%)',
+        }}
+      />
+
+      <div className="relative flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5" aria-hidden>
+            <path d="M17.05 11.97a4.78 4.78 0 0 1 2.28-4.01 4.9 4.9 0 0 0-3.86-2.09c-1.62-.16-3.18 1-4 1-.84 0-2.1-.97-3.46-.95a5.16 5.16 0 0 0-4.34 2.65c-1.86 3.22-.47 7.99 1.34 10.6.88 1.28 1.93 2.72 3.31 2.67 1.33-.05 1.84-.86 3.45-.86 1.6 0 2.07.86 3.48.83 1.44-.02 2.35-1.3 3.23-2.59a11.5 11.5 0 0 0 1.46-3.02 4.65 4.65 0 0 1-2.89-4.23zM14.6 4.5A4.7 4.7 0 0 0 15.7 1a4.78 4.78 0 0 0-3.07 1.59 4.4 4.4 0 0 0-1.13 3.36 3.95 3.95 0 0 0 3.1-1.45z" />
+          </svg>
+          <div className="text-left">
+            <div className="font-mono text-[10px] tracking-[0.22em] uppercase font-semibold opacity-70">
+              download · v{version}
+            </div>
+            <div className="font-display font-bold text-[17px] tracking-[-0.02em] leading-tight">
+              Get Rax for macOS
+            </div>
+          </div>
+        </div>
+        <span className="font-mono text-[11px] tracking-[0.18em] uppercase opacity-75 font-medium hidden sm:flex items-center gap-1.5">
+          {archLabel}
+          <span aria-hidden>↓</span>
+        </span>
+        <span className="sm:hidden text-[18px] opacity-80" aria-hidden>↓</span>
       </div>
     </a>
   )

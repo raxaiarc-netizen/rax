@@ -32,6 +32,17 @@ const RAW: Record<string, ModelPricing> = {
     cacheWritePerMTok:   1.25,
     cacheReadPerMTok:    0.10,
   },
+  // Moonshot Kimi K2.6 — billed via /v1/messages → Moonshot's
+  // Anthropic-compatible endpoint. Cache-miss input = $0.95/Mtok, cache hit
+  // = $0.16/Mtok, output = $4.00/Mtok. Moonshot doesn't quote a separate
+  // cache-write price (caching is automatic), so we charge cache writes at
+  // the cache-miss input rate — the same tokens you'd pay for anyway.
+  'kimi-k2.6': {
+    inputPerMTok:        0.95,
+    outputPerMTok:       4.00,
+    cacheWritePerMTok:   0.95,
+    cacheReadPerMTok:    0.16,
+  },
 }
 
 /** Resolve a model id (incl. dated suffixes / aliases) to its base entry. */
@@ -51,6 +62,14 @@ export function isSupportedModel(model: string): boolean {
   if (RAW[model]) return true
   for (const k of Object.keys(RAW)) if (model.startsWith(k)) return true
   return false
+}
+
+/** "Rax Default" — every kimi-* model id is free for the user (within caps).
+ *  The route bypasses the credit debit and runs a per-user daily/monthly
+ *  raw-cost quota check instead. Keep this in lockstep with the SQL
+ *  `model like 'kimi-%'` filter in 0004_free_tier.sql. */
+export function isFreeModel(model: string): boolean {
+  return model.startsWith('kimi-')
 }
 
 /** Convert a token count + per-Mtok rate to USD cents (rounded up). */
@@ -108,6 +127,22 @@ export function estimateCost(
     toCents(inputTokens,                       p.inputPerMTok) +
     toCents(cappedOutput,                      p.outputPerMTok)
   return Math.ceil(raw * MARKUP)
+}
+
+/** Raw upstream cost estimate (no markup) used by the free-tier quota
+ *  check. Free-tier requests don't bill credits so MARKUP doesn't apply;
+ *  the cap is stated in real upstream cents. */
+export function estimateRawCost(
+  model: string,
+  inputTokens: number,
+  maxOutputTokens: number,
+): number {
+  const p = pricingFor(model)
+  const cappedOutput = Math.min(maxOutputTokens, ESTIMATE_MAX_OUTPUT_TOKENS)
+  return (
+    toCents(inputTokens,  p.inputPerMTok) +
+    toCents(cappedOutput, p.outputPerMTok)
+  )
 }
 
 /** Subscription tiers shown on the dashboard. Each tier is a Whop

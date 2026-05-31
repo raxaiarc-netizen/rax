@@ -34,7 +34,6 @@ const MD_COMPONENTS = {
 
 export function MessagesPane() {
   const sendMessage = useSessionStore((s) => s.sendMessage)
-  const staticInfoProjectPath = useSessionStore((s) => s.staticInfo?.projectPath || '/')
 
   // Only re-render this component when the fields it actually uses change.
   // Picking the tab in a `useShallow` block means messages-array reference
@@ -130,7 +129,6 @@ export function MessagesPane() {
               tools={data.permissionDenied.tools}
               hookReached={data.permissionDenied.hookReached}
               sessionId={data.claudeSessionId}
-              projectPath={staticInfoProjectPath}
               onDismiss={() => {
                 useSessionStore.setState((s) => ({
                   tabs: s.tabs.map((t) =>

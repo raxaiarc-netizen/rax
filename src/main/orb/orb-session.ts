@@ -423,9 +423,11 @@ export class OrbSession extends EventEmitter {
       '--mcp-config', this.mcpConfigPath,
       '--append-system-prompt', ORB_SYSTEM_PROMPT,
     ]
-    if (this.opts.model) {
+    if (this.opts.model && !this.opts.model.startsWith('kimi-')) {
       args.push('--model', this.opts.model)
     }
+    // kimi-* model ids fail the CLI's local --model validator. We omit the
+    // flag and let buildClaudeEnv's ANTHROPIC_*_MODEL env vars take over.
 
     const { command, args: spawnArgs, instance } = buildClaudeSpawnInvocation(args)
     log(`Spawning orb claude [${instance.mode}]: ${command} ${spawnArgs.slice(0, 12).join(' ')} …`)
@@ -433,7 +435,9 @@ export class OrbSession extends EventEmitter {
     const child = spawn(command, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.opts.projectPath,
-      env: buildClaudeEnv(),
+      // RAX_REQUESTED_MODEL tells buildClaudeEnv which provider to wire
+      // (kimi-* → Moonshot, otherwise Rax cloud or user's own creds).
+      env: buildClaudeEnv(this.opts.model ? { RAX_REQUESTED_MODEL: this.opts.model } : undefined),
     })
     this.child = child
     log(`Spawned PID ${child.pid}`)

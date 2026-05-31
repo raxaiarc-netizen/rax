@@ -140,8 +140,9 @@ let orbWindow: BrowserWindow | null = null
 let welcomeWindow: BrowserWindow | null = null
 // Vertical agent dock — always-on-top floating window on the left edge of the
 // user's primary display. Shows the five-agent roster (Max/Alex/Luna/Nova/Zara)
-// + status indicators + completion toasts. Independent lifecycle from
-// pill / fullscreen / orb; toggled via Cmd+Shift+D or the tray.
+// + status indicators + completion toasts. Lifecycle is slaved to the orb:
+// created/shown by showOrbWindow(), hidden by hideOrbWindow(). The dock has
+// no independent summon/dismiss — it only ever appears while the orb is up.
 let dockWindow: BrowserWindow | null = null
 // Bottom-of-screen "caption pill" subtitle window. Lifecycle is tied to the
 // orb window: created right after the orb on summon, destroyed when the orb
@@ -785,13 +786,9 @@ ipcMain.handle(IPC.LAUNCH_PILL, async () => {
     createWindow()
     snapshotWindowState('after deferred createWindow')
   }
-  // First-time users go straight from the welcome window to the pill — the
-  // agent dock follows the pill so a new user lands on the multi-agent UI
-  // they were just sold in onboarding rather than discovering it on next
-  // launch.
-  if (!dockWindow || dockWindow.isDestroyed()) {
-    createDockWindow()
-  }
+  // The dock no longer rides along with the pill — it's slaved to the orb's
+  // visibility (see showOrbWindow / hideOrbWindow), so new users will see it
+  // appear the first time they summon the voice orb.
   // Wait one tick for ready-to-show to land if this is the first create.
   await new Promise((r) => setTimeout(r, 50))
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1187,6 +1184,9 @@ function createOrbWindow(): void {
     // Tear down the caption pill along with the orb. The caption is a pure
     // companion surface — it has no reason to outlive the orb.
     destroyCaptionPillWindow()
+    // Same goes for the agent dock — it's slaved to orb visibility, so an
+    // orb that's fully gone must not leave a dock behind on screen.
+    hideDockWindow()
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -1327,17 +1327,24 @@ function repositionCaptionPillWindow(): void {
 function showOrbWindow(): void {
   if (!orbWindow || orbWindow.isDestroyed()) {
     createOrbWindow()
+    // The dock is a companion surface to the orb — it only appears while the
+    // orb is on screen. createDockWindow() creates if absent, otherwise shows.
+    createDockWindow()
     return
   }
   reassertOrbVisibility('show')
   orbWindow.show()
   orbWindow.focus()
+  createDockWindow()
   orb.ensureStarted().catch((err) => log(`Orb start error: ${(err as Error).message}`))
 }
 
 function hideOrbWindow(): void {
   if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()) {
     orbWindow.hide()
+    // Dock follows the orb — when the orb leaves the screen the dock goes
+    // with it. hideDockWindow() is idempotent if the dock isn't visible.
+    hideDockWindow()
     // Kill any in-flight TTS up front so audio stops the moment the orb
     // disappears, instead of waiting for the renderer's onDismissed handler
     // to round-trip ttsCancel back through IPC (~50–100ms gap during which
@@ -1383,6 +1390,11 @@ function toggleOrbWindow(): void {
 // space switches and fullscreen apps. Click-through outside the icon bounds —
 // the renderer toggles capture via setIgnoreMouseEvents when the cursor enters
 // the icon column (mirrors src/renderer/orb/App.tsx's pattern).
+//
+// Visibility is slaved to the orb: showOrbWindow() creates/shows the dock,
+// hideOrbWindow() hides it. No independent toggle (no global shortcut, no
+// tray entry) — the dock is a companion surface to the voice orb and only
+// appears while the orb is on screen.
 
 // Inset from the left edge of the work area. Tuned so the visible glass
 // column sits ~12px off the screen edge — close enough to read as an "edge
@@ -1513,10 +1525,11 @@ function createDockWindow(): void {
 
   dockWindow.once('ready-to-show', () => {
     if (!dockWindow || dockWindow.isDestroyed()) return
-    // The dock is an ambient surface — always show on app start. The saved
-    // `visible` flag only governs in-session toggles (Cmd+Shift+D / tray) so
-    // an accidental hide doesn't render the feature invisible across a
-    // restart, leaving the user wondering where it went.
+    // We only ever reach createDockWindow() from showOrbWindow(), so by the
+    // time this fires the caller wants the dock visible. The saved `visible`
+    // flag in dock-state.json is now ignored — visibility is always slaved to
+    // the orb. We only persist position so the dock returns to where the user
+    // last parked it.
     dockWindow.show()
     // Start fully click-through; the renderer flips capture back on when the
     // cursor enters the icon column. `forward: true` is critical so the
@@ -3276,10 +3289,8 @@ app.whenReady().then(async () => {
   } else {
     createWindow()
     snapshotWindowState('after createWindow')
-    // Boot the agent dock alongside the pill. The dock honours its saved
-    // visible flag, so users who explicitly hid it last session don't get
-    // ambushed by a re-show.
-    createDockWindow()
+    // Dock is no longer an ambient surface — it's slaved to the orb's
+    // visibility (see showOrbWindow / hideOrbWindow). Nothing to create here.
   }
 
   if (SPACES_DEBUG) {
@@ -3346,10 +3357,10 @@ app.whenReady().then(async () => {
   globalShortcut.register('CommandOrControl+Shift+K', () => toggleWindow('shortcut Cmd/Ctrl+Shift+K'))
   // Fullscreen window — Cmd+Shift+F
   globalShortcut.register('CommandOrControl+Shift+F', () => toggleFullscreenWindow())
-  // Voice orb — Cmd+Shift+O (Siri-style summon)
+  // Voice orb — Cmd+Shift+O (Siri-style summon). The dock rides along with
+  // the orb (see showOrbWindow / hideOrbWindow), so there's no separate dock
+  // shortcut anymore — toggling the orb toggles the dock.
   globalShortcut.register('CommandOrControl+Shift+O', () => toggleOrbWindow())
-  // Agent dock — Cmd+Shift+D (toggle the vertical dock on the left edge)
-  globalShortcut.register('CommandOrControl+Shift+D', () => toggleDockWindow())
   // Push-to-talk: summon the orb (if hidden) AND immediately start listening.
   // We mark the intent and let the renderer flush it once it has wired its
   // listener (`ORB_RENDERER_READY`). Previously we relied on a 220ms timeout
@@ -3419,11 +3430,6 @@ app.whenReady().then(async () => {
         label: orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible() ? 'Hide Voice Orb' : 'Summon Voice Orb',
         accelerator: 'CommandOrControl+Shift+O',
         click: () => toggleOrbWindow(),
-      },
-      {
-        label: dockWindow && !dockWindow.isDestroyed() && dockWindow.isVisible() ? 'Hide Agent Dock' : 'Show Agent Dock',
-        accelerator: 'CommandOrControl+Shift+D',
-        click: () => toggleDockWindow(),
       },
       { type: 'separator' },
       {

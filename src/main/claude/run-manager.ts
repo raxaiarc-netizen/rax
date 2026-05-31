@@ -185,9 +185,12 @@ export class RunManager extends EventEmitter {
     if (options.sessionId) {
       args.push('--resume', options.sessionId)
     }
-    if (options.model) {
+    if (options.model && !options.model.startsWith('kimi-')) {
       args.push('--model', options.model)
     }
+    // For kimi-* the CLI's own model validator rejects the id before any
+    // request is sent. We omit --model and rely on the ANTHROPIC_*_MODEL
+    // env vars set by buildClaudeEnv to route the spawn to Moonshot.
     if (options.addDirs && options.addDirs.length > 0) {
       for (const dir of options.addDirs) {
         args.push('--add-dir', dir)
@@ -270,7 +273,10 @@ export class RunManager extends EventEmitter {
     const child = spawn(command, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
-      env: buildClaudeEnv(),
+      // RAX_REQUESTED_MODEL tells buildClaudeEnv which provider to wire
+      // (kimi-* → Moonshot, otherwise Rax cloud or user's own creds).
+      // The sentinel is stripped before the subprocess inherits the env.
+      env: buildClaudeEnv(options.model ? { RAX_REQUESTED_MODEL: options.model } : undefined),
     })
 
     log(`Spawned PID: ${child.pid}`)

@@ -322,9 +322,12 @@ export class PtyRunManager extends EventEmitter {
     if (options.sessionId) {
       args.push('--resume', options.sessionId)
     }
-    if (options.model) {
+    if (options.model && !options.model.startsWith('kimi-')) {
       args.push('--model', options.model)
     }
+    // Skip --model for kimi-*: the CLI rejects unknown ids locally before
+    // they reach Moonshot. buildClaudeEnv injects ANTHROPIC_*_MODEL so the
+    // spawn still resolves to the picked kimi model.
     if (options.allowedTools?.length) {
       args.push('--allowedTools', options.allowedTools.join(','))
     }
@@ -344,7 +347,9 @@ export class PtyRunManager extends EventEmitter {
       cols: 120,
       rows: 40,
       cwd,
-      env: buildClaudeEnv() as Record<string, string>,
+      // RAX_REQUESTED_MODEL tells buildClaudeEnv which provider to wire
+      // (kimi-* → Moonshot, otherwise Rax cloud or user's own creds).
+      env: buildClaudeEnv(options.model ? { RAX_REQUESTED_MODEL: options.model } : undefined) as Record<string, string>,
     })
 
     log(`Spawned PTY PID: ${ptyProcess.pid}`)

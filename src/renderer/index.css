@@ -23,11 +23,14 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Force Poppins everywhere — overrides browser defaults on <pre>, <code>, <kbd>, <samp>, <textarea>, <input>, <button>, <select> which would otherwise fall back to monospace/system fonts. */
-*, *::before, *::after,
+/* Force Poppins on form controls and code-leaning tags that ship a UA default
+ * (monospace) — but NOT on `*`. A universal `font-family: ...!important` rule
+ * forces a font cascade recalc on every element in the tree on every DOM
+ * mutation, and the !important blocks per-component overrides. Inheritance
+ * handles everything else: body sets the family and DOM children inherit. */
 pre, code, kbd, samp, tt,
 textarea, input, button, select, optgroup {
-  font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif !important;
+  font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
 }
 
 /* ─── Scrollbar — thin & subtle ─── */

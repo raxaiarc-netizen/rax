@@ -745,6 +745,9 @@ html.light {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Confine paint + layout invalidation to the scroller so a section update
+   * doesn't dirty the sidebar / titlebar. */
+  contain: layout paint;
 }
 
 /* ─── Chat surface (welcome + conversation + composer) ─── */
@@ -2216,6 +2219,13 @@ html.light .fs-plugin-sheet-backdrop { background: rgba(28, 25, 18, 0.40); }
 /* ─── Settings rows — Apple grouped style ─── */
 .fs-settings-section {
   padding: 28px 56px;
+  /* Skip painting sections that are scrolled out of the page body. Each
+   * section is independently substantial (rows of inputs, icons, selects),
+   * so letting Chromium short-circuit offscreen ones makes scrolling and
+   * theme/setting changes materially cheaper. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 360px;
+  contain: layout paint style;
 }
 .fs-settings-section + .fs-settings-section {
   border-top: 1px solid var(--fs-divider);
@@ -2612,7 +2622,15 @@ html.light .fs-plugin-sheet-backdrop { background: rgba(28, 25, 18, 0.40); }
   background-clip: content-box;
   transition: background 0.18s var(--fs-ease);
 }
-.fs-shell *:hover::-webkit-scrollbar-thumb {
+/* Reveal the thumb on hover of the actual scroll containers — not via a
+ * universal `.fs-shell *:hover` selector, which forces the browser to
+ * re-evaluate hover state against the entire subtree on every mouse move. */
+.fs-page-body:hover::-webkit-scrollbar-thumb,
+.fs-chat-stream:hover::-webkit-scrollbar-thumb,
+.fs-chat-list:hover::-webkit-scrollbar-thumb,
+.fs-sidebar-inner:hover::-webkit-scrollbar-thumb,
+.fs-welcome:hover::-webkit-scrollbar-thumb,
+.fs-codex-text:hover::-webkit-scrollbar-thumb {
   background: var(--fs-border-strong);
   background-clip: content-box;
 }

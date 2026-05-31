@@ -311,13 +311,22 @@ export function onModeChange(cb: (instance: ClaudeInstance) => void): () => void
  * Build an env block that points the spawned claude at the active instance's
  * config dir, plus the usual login-shell PATH augmentation.
  *
- * When Rax cloud mode is active (user signed in + toggle on), this also
- * injects `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` so the spawned
- * CLI routes through the hosted Rax proxy.
+ * Provider routing:
+ *   raxAuth.isActive()  → Rax cloud proxy (rax-ai.com forwards to the right
+ *                         upstream, including Moonshot for kimi-* models)
+ *   else                → user's own ANTHROPIC_API_KEY / claude.ai login
+ *
+ * Callers may pass the per-spawn picked model id via the `RAX_REQUESTED_MODEL`
+ * sentinel inside `extraEnv`; we strip it here so it never leaks into the
+ * subprocess. (No longer routed on locally — kept only for back-compat.)
  */
 export function buildClaudeEnv(extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const instance = getActiveInstance()
   const env = getCliEnv(extraEnv)
+
+  // Strip the per-spawn model hint so subprocesses don't inherit a
+  // Rax-internal env var.
+  delete env.RAX_REQUESTED_MODEL
 
   // ─── Rax cloud env injection ─────────────────────────────────────────
   if (raxAuth.isActive()) {

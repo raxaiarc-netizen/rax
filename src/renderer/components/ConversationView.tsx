@@ -60,7 +60,6 @@ export function ConversationView() {
   const tabs = useSessionStore((s) => s.tabs)
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const sendMessage = useSessionStore((s) => s.sendMessage)
-  const staticInfo = useSessionStore((s) => s.staticInfo)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const [hovered, setHovered] = useState(false)
@@ -212,7 +211,6 @@ export function ConversationView() {
               tools={tab.permissionDenied.tools}
               hookReached={tab.permissionDenied.hookReached}
               sessionId={tab.claudeSessionId}
-              projectPath={staticInfo?.projectPath || process.cwd()}
               onDismiss={() => {
                 useSessionStore.setState((s) => ({
                   tabs: s.tabs.map((t) =>

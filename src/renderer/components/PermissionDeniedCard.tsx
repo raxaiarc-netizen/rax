@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { motion } from 'framer-motion'
-import { ShieldWarning, Terminal, ArrowSquareOut, CheckCircle, Prohibit } from '@phosphor-icons/react'
+import { ShieldWarning, Terminal, CheckCircle, Prohibit } from '@phosphor-icons/react'
 import { useColors } from '../theme'
 import { useSessionStore } from '../stores/sessionStore'
 
@@ -8,14 +8,13 @@ interface Props {
   tabId: string
   tools: Array<{ toolName: string; toolUseId: string }>
   sessionId: string | null
-  projectPath: string
   /** Whether the user actually saw an approval prompt for this run.
    *  false = the hook never reached the user — treated as an error condition. */
   hookReached: boolean
   onDismiss: () => void
 }
 
-export function PermissionDeniedCard({ tabId, tools, sessionId, projectPath, hookReached, onDismiss }: Props) {
+export function PermissionDeniedCard({ tabId, tools, sessionId, hookReached, onDismiss }: Props) {
   const colors = useColors()
   const [busy, setBusy] = useState(false)
 
@@ -32,13 +31,6 @@ export function PermissionDeniedCard({ tabId, tools, sessionId, projectPath, hoo
         `Permission granted for ${list} for the rest of this conversation. Please continue what you were doing — don't start over, just resume from where the tool call was blocked.`
       )
     }
-  }
-
-  const handleOpenInCli = () => {
-    if (sessionId) {
-      window.rax.openInTerminal(sessionId, projectPath)
-    }
-    onDismiss()
   }
 
   return (
@@ -155,26 +147,6 @@ export function PermissionDeniedCard({ tabId, tools, sessionId, projectPath, hoo
               <Prohibit size={12} />
               Deny
             </button>
-            {sessionId && (
-              <button
-                onClick={handleOpenInCli}
-                className="text-[11px] font-medium px-3 py-1.5 rounded-full transition-colors cursor-pointer flex items-center gap-1.5"
-                style={{
-                  background: colors.surfaceHover,
-                  color: colors.textTertiary,
-                  border: `1px solid ${colors.surfaceSecondary}`,
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = colors.surfaceActive
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = colors.surfaceHover
-                }}
-              >
-                <ArrowSquareOut size={12} />
-                Open in CLI
-              </button>
-            )}
           </div>
         </div>
       </div>
