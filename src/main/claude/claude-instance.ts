@@ -167,9 +167,12 @@ function resolveBundledEntry(): { path: string | null; reason?: string } {
   const reason =
     'Bundled Claude Code not found in resources/claude-cli/. ' +
     'Run `npm run vendor-claude` to vendor it before building.'
-  const result = { path: null as string | null, reason }
-  cachedBundledEntry = result
-  return result
+  // Do NOT cache the miss. The CLI can appear after the first check (vendor
+  // script finishing after app launch in dev, or a first-launch unpack race
+  // in the packaged app). Caching null here would pin the failure until a
+  // full restart even once the binary exists. Only successful resolutions
+  // above are cached; a miss stays retryable.
+  return { path: null as string | null, reason }
 }
 
 // ─── System binary discovery (the original logic, deduplicated) ───────────

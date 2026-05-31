@@ -1,6 +1,6 @@
 {
   "name": "rax",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Rax — Command Line User Interface for Claude Code",
   "license": "MIT",
   "repository": {
@@ -16,8 +16,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "dist": "electron-vite build --mode production && electron-builder --mac",
-    "publish": "electron-vite build --mode production && electron-builder --mac --publish always",
+    "dist": "npm run vendor-all && electron-vite build --mode production && electron-builder --mac",
+    "publish": "npm run vendor-all && electron-vite build --mode production && electron-builder --mac --publish always",
     "doctor": "bash scripts/doctor.sh",
     "vendor-claude": "bash scripts/vendor-claude.sh",
     "vendor-whisper": "bash scripts/vendor-whisper.sh",
@@ -44,6 +44,7 @@
   "build": {
     "appId": "com.rax.app",
     "productName": "Rax",
+    "afterPack": "./scripts/verify-bundled-cli.cjs",
     "directories": {
       "output": "release"
     },

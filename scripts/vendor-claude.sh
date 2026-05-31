@@ -21,19 +21,35 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DEST_DIR="$ROOT_DIR/resources/claude-cli"
 INSTALLED_VERSION_FILE="$DEST_DIR/.vendored-version"
 
-# Skip download if already at the right version (and not forced).
-if [[ "${FORCE:-0}" != "1" && -f "$INSTALLED_VERSION_FILE" ]]; then
+# Is the actual entry binary present? A stale .vendored-version with a missing
+# binary must NOT count as "already vendored" — bin/ is gitignored, so a fresh
+# checkout (or a CI/build machine) has the version file but no binary. If we
+# skipped on the version file alone, the build would ship a binary-less
+# claude-cli and every user hits "Bundled Claude Code not found." (This is
+# exactly what shipped broken in v1.1.0.)
+ENTRY_PRESENT=0
+if [[ -f "$DEST_DIR/entry.json" ]]; then
+  EXISTING_ENTRY="$(node -e 'try{process.stdout.write(String(require("'"$DEST_DIR"'/entry.json").entry||""))}catch{process.stdout.write("")}' 2>/dev/null || true)"
+  if [[ -n "$EXISTING_ENTRY" && -f "$DEST_DIR/$EXISTING_ENTRY" ]]; then
+    ENTRY_PRESENT=1
+  fi
+fi
+
+# Skip download only if the right version AND the real binary are present.
+if [[ "${FORCE:-0}" != "1" && -f "$INSTALLED_VERSION_FILE" && "$ENTRY_PRESENT" == "1" ]]; then
   CURRENT="$(cat "$INSTALLED_VERSION_FILE")"
   if [[ "$PKG_VERSION" == "latest" ]]; then
     # If user asked for latest and we have *some* version vendored, keep it
     # (avoid network on every install). Force with FORCE=1 to refresh.
-    echo "vendor-claude: already vendored (version $CURRENT). Set FORCE=1 to refresh."
+    echo "vendor-claude: already vendored (version $CURRENT, binary present). Set FORCE=1 to refresh."
     exit 0
   fi
   if [[ "$CURRENT" == "$PKG_VERSION" ]]; then
-    echo "vendor-claude: already at $CURRENT, nothing to do."
+    echo "vendor-claude: already at $CURRENT (binary present), nothing to do."
     exit 0
   fi
+elif [[ "${FORCE:-0}" != "1" && -f "$INSTALLED_VERSION_FILE" && "$ENTRY_PRESENT" == "0" ]]; then
+  echo "vendor-claude: .vendored-version present but entry binary missing — re-vendoring."
 fi
 
 # Resolve target version + tarball URL from npm registry.
