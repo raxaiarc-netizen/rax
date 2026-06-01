@@ -2764,6 +2764,12 @@ ipcMain.handle(IPC.ORB_RESET_SESSION, () => {
   return { ok: true }
 })
 
+ipcMain.handle(IPC.ORB_SET_MODEL, (_event, modelId: string) => {
+  if (typeof modelId !== 'string' || !modelId) return { ok: false }
+  orb.setModel(modelId)
+  return { ok: true }
+})
+
 ipcMain.handle(IPC.ORB_TTS_SPEAK, (_event, text: string) => {
   if (typeof text !== 'string') return { id: '' }
   const id = tts.speak(text)

@@ -327,8 +327,9 @@ export function buildClaudeEnv(extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   const instance = getActiveInstance()
   const env = getCliEnv(extraEnv)
 
-  // Strip the per-spawn model hint so subprocesses don't inherit a
-  // Rax-internal env var.
+  // Pull the per-spawn model hint, then strip it so subprocesses don't
+  // inherit a Rax-internal env var.
+  const requestedModel = (env.RAX_REQUESTED_MODEL || '').trim()
   delete env.RAX_REQUESTED_MODEL
 
   // ─── Rax cloud env injection ─────────────────────────────────────────
@@ -340,6 +341,20 @@ export function buildClaudeEnv(extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
       // Don't leak the user's own Anthropic key alongside — pick one.
       delete env.ANTHROPIC_API_KEY
     }
+  }
+
+  // ─── kimi-* (Rax Default) model pinning ──────────────────────────────
+  // For kimi-* the CLI's --model flag is skipped (its validator rejects
+  // non-Anthropic ids), so without this the CLI sends its built-in default
+  // (e.g. claude-opus-4-8) to the Rax proxy, which 400s. Pin the model via
+  // env so the CLI emits kimi-k2.6 to whatever base URL is active — the Rax
+  // cloud proxy then forwards kimi-* upstream to Moonshot. No local key
+  // needed; only the model NAME is set here (creds come from Rax cloud).
+  if (requestedModel.startsWith('kimi-')) {
+    env.ANTHROPIC_MODEL = requestedModel
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = requestedModel
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = requestedModel
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = requestedModel
   }
 
   if (instance.configDir) {

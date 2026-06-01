@@ -471,6 +471,8 @@ export const IPC = {
   ORB_SUBMIT_TURN: 'rax:orb-submit-turn',
   ORB_CANCEL_TURN: 'rax:orb-cancel-turn',
   ORB_RESET_SESSION: 'rax:orb-reset-session',
+  // Renderer→main: keep the voice orb's model aligned with the picker.
+  ORB_SET_MODEL: 'rax:orb-set-model',
   ORB_EVENT: 'rax:orb-event',
   ORB_DISMISSED: 'rax:orb-dismissed',
   ORB_FORCE_LISTEN: 'rax:orb-force-listen',

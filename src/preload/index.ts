@@ -98,6 +98,9 @@ export interface RaxAPI {
   showOrb(): Promise<{ ok: boolean }>
   toggleOrb(): Promise<{ ok: boolean }>
   resetOrb(): Promise<{ ok: boolean }>
+  /** Align the voice orb's model with the picker. Sent whenever the user
+   *  changes the preferred model so the orb's next turn uses the same id. */
+  setOrbModel(modelId: string): Promise<{ ok: boolean }>
   /** Persist a Kokoro voice id and apply it to the live TTSManager. The
    *  renderer Settings dropdown is the only call site today. Returns
    *  `{ok:false}` if the id isn't in the catalog. */
@@ -298,6 +301,7 @@ const api: RaxAPI = {
   showOrb: () => ipcRenderer.invoke(IPC.ORB_SHOW),
   toggleOrb: () => ipcRenderer.invoke(IPC.ORB_TOGGLE),
   resetOrb: () => ipcRenderer.invoke(IPC.ORB_RESET_SESSION),
+  setOrbModel: (modelId: string) => ipcRenderer.invoke(IPC.ORB_SET_MODEL, modelId),
   setOrbVoice: (voiceId) => ipcRenderer.invoke(IPC.ORB_TTS_SET_VOICE, voiceId),
   getOrbVoice: () => ipcRenderer.invoke(IPC.ORB_TTS_GET_VOICE),
 
