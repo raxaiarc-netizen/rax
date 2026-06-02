@@ -38,15 +38,27 @@ DTYPE="${VENDOR_KOKORO_DTYPE:-q8}"
 
 MARKER_CONTENT="$MODEL_ID|$DTYPE"
 
+# The actual model weights live in onnx/model_<dtype>.onnx. A stale marker
+# with the .onnx missing must NOT count as vendored — the weights are
+# gitignored, so a checkout has the marker + config JSONs but no model, and
+# skipping on the marker alone ships a TTS-less bundle (orb can't speak).
+MODEL_DIR="$CACHE_DIR/$MODEL_ID/onnx"
+ONNX_PRESENT=0
+if compgen -G "$MODEL_DIR/model_*.onnx" > /dev/null 2>&1; then
+  ONNX_PRESENT=1
+fi
+
 # ─── Skip-if-already-vendored fast path ───────────────────────────────────
-if [[ "${FORCE:-0}" != "1" && -f "$MARKER" ]]; then
+if [[ "${FORCE:-0}" != "1" && -f "$MARKER" && "$ONNX_PRESENT" == "1" ]]; then
   CURRENT="$(cat "$MARKER")"
   if [[ "$CURRENT" == "$MARKER_CONTENT" ]]; then
     SIZE="$(du -sh "$CACHE_DIR" 2>/dev/null | awk '{print $1}')"
-    echo "vendor-kokoro: already vendored ($MODEL_ID @ $DTYPE, $SIZE) — nothing to do."
+    echo "vendor-kokoro: already vendored ($MODEL_ID @ $DTYPE, $SIZE, model present) — nothing to do."
     exit 0
   fi
   echo "vendor-kokoro: marker mismatch (have='$CURRENT', want='$MARKER_CONTENT') — re-vendoring."
+elif [[ "${FORCE:-0}" != "1" && -f "$MARKER" && "$ONNX_PRESENT" == "0" ]]; then
+  echo "vendor-kokoro: marker present but model_*.onnx missing — re-vendoring."
 fi
 
 # ─── Pre-flight ───────────────────────────────────────────────────────────
