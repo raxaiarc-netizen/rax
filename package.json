@@ -1,6 +1,6 @@
 {
   "name": "rax",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Rax — Command Line User Interface for Claude Code",
   "license": "MIT",
   "repository": {

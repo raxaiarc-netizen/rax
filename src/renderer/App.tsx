@@ -10,6 +10,7 @@ import { PopoverLayerProvider } from './components/PopoverLayer'
 import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
 import { useSessionStore } from './stores/sessionStore'
+import { DEFAULT_MODEL_ID } from '../shared/types'
 import { AGENTS } from '../shared/agents'
 import { useColors, useThemeStore, spacing } from './theme'
 
@@ -81,6 +82,17 @@ export default function App() {
         void window.rax.createTab({ desiredId: agent.id }).catch(() => {})
       }
     })
+  }, [])
+
+  // Align the voice orb's model with the picker ON STARTUP. setPreferredModel
+  // pushes to the orb on every *change*, but the store hydrates the persisted
+  // model from localStorage at boot without firing that path — so a user who
+  // had "Rax Default" selected would have the orb fall back to its own default
+  // (a paid Claude model) and 402 on the free tier. Push the hydrated model
+  // once on mount so the orb matches what the picker shows from the first turn.
+  useEffect(() => {
+    const model = useSessionStore.getState().preferredModel || DEFAULT_MODEL_ID
+    try { void window.rax.setOrbModel(model) } catch {}
   }, [])
 
   // Cross-renderer state mirror — receive mutations from the fullscreen window
