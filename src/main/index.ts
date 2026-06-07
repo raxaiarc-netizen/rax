@@ -96,6 +96,29 @@ function installContentSecurityPolicy(): void {
   })
 }
 
+/**
+ * Grant the renderer's microphone request at the Electron session level.
+ *
+ * The voice orb records mic audio via getUserMedia in the renderer. OS-level
+ * mic access is requested separately (systemPreferences.askForMediaAccess),
+ * but Electron ALSO gates getUserMedia behind the session's permission
+ * handler — and with no handler set, several macOS/Electron combinations
+ * silently DENY 'media', so getUserMedia rejects with NotAllowedError and
+ * whisper never receives any audio. This wouldn't reproduce on a dev machine
+ * that already granted the permission, but bites a fresh DMG install. We grant
+ * permissions for our own first-party, CSP-restricted renderer.
+ */
+function installMediaPermissionHandler(): void {
+  const ses = session.defaultSession
+  // The renderer is our own bundled, CSP-restricted content — there's no
+  // untrusted web origin to guard against, so granting its permission
+  // requests (chiefly 'media' for the mic) is safe and avoids the silent
+  // getUserMedia denial. Mirrors the permissive behaviour that existed before
+  // any handler, but now explicit so media is reliably allowed.
+  ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(true))
+  ses.setPermissionCheckHandler(() => true)
+}
+
 function log(msg: string): void {
   _log('main', msg)
 }
@@ -3265,6 +3288,7 @@ app.whenReady().then(async () => {
   await requestPermissions()
 
   installContentSecurityPolicy()
+  installMediaPermissionHandler()
 
   // Skill provisioning — non-blocking, streams status to renderer
   ensureSkills((status: SkillStatus) => {
