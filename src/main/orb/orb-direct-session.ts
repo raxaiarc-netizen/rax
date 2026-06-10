@@ -133,6 +133,10 @@ export class OrbDirectSession extends EventEmitter {
    * can splice in the same updates seamlessly.
    */
   private pendingCompletions: AgentCompletion[] = []
+  /** TLS/DNS handshake to the API origin already completed this session. */
+  private connectionPrewarmed = false
+  /** Model id whose prompt cache was prewarmed (null = not yet / failed). */
+  private cachePrewarmedFor: string | null = null
 
   constructor(opts: OrbDirectSessionOptions) {
     super()
@@ -422,11 +426,69 @@ export class OrbDirectSession extends EventEmitter {
   }
 
   warmup(): void {
-    // Cold-start has nothing meaningful to do — the client is a thin handle.
-    // Touch `_ensureClient` so config errors surface at warmup time instead
-    // of on the first user turn. Async; fire-and-forget — submitTurn awaits
-    // the same call, so this is purely a "warm the cache" hint.
-    this._ensureClient().catch((err) => log(`Warmup _ensureClient failed: ${(err as Error).message}`))
+    // The client is a thin handle — what actually costs time on the first
+    // turn is the cold HTTPS handshake to the API origin (DNS + TCP + TLS,
+    // ~150-400ms; more through the Rax proxy). Resolve credentials, then
+    // fire a throwaway request at the origin so the handshake completes and
+    // a TLS session ticket is cached while the user is still talking.
+    // Fire-and-forget — submitTurn awaits the same _ensureClient call.
+    this._ensureClient()
+      .then(() => this._prewarmConnection())
+      .then(() => this._prewarmPromptCache())
+      .catch((err) => log(`Warmup _ensureClient failed: ${(err as Error).message}`))
+  }
+
+  /** One-shot DNS/TCP/TLS prewarm against the API origin. Any response —
+   *  even a 401 — means the handshake completed, which is all we want;
+   *  failures (offline, blocked) cost nothing because the first real
+   *  request would have paid the same handshake anyway. */
+  private async _prewarmConnection(): Promise<void> {
+    if (this.connectionPrewarmed || !this.client) return
+    this.connectionPrewarmed = true
+    const origin = (this.client.baseURL || 'https://api.anthropic.com').replace(/\/$/, '')
+    const startedAt = Date.now()
+    try {
+      await fetch(`${origin}/v1/models?limit=1`, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(5_000),
+      })
+      log(`Connection prewarm done in ${Date.now() - startedAt}ms (${origin})`)
+    } catch {
+      // Offline or blocked — first real request pays the handshake itself.
+    }
+  }
+
+  /**
+   * Write the prompt cache (system prompt + tool defs) while the user is
+   * still talking, so the FIRST real turn gets a cache READ instead of
+   * paying the cache write inline. One throwaway max_tokens=1 request per
+   * session per model — the write cost is identical to what the first turn
+   * would have paid anyway; only the timing moves. Failures are non-fatal
+   * and un-latch the guard so a transient error doesn't disable the
+   * optimization for the whole session.
+   */
+  private async _prewarmPromptCache(): Promise<void> {
+    if (!this.client) return
+    const model = this.opts.model || DEFAULT_MODEL
+    if (this.cachePrewarmedFor === model) return
+    this.cachePrewarmedFor = model
+    const system: Anthropic.Messages.TextBlockParam[] = this.oauthMode
+      ? [{ type: 'text', text: CLAUDE_CODE_OAUTH_PREAMBLE }, ...SYSTEM_PROMPT_CACHED]
+      : SYSTEM_PROMPT_CACHED
+    const startedAt = Date.now()
+    try {
+      await this.client.messages.create({
+        model,
+        max_tokens: 1,
+        system,
+        tools: buildToolDefs(),
+        messages: [{ role: 'user', content: 'warmup' }],
+      })
+      log(`Prompt-cache prewarm done in ${Date.now() - startedAt}ms (${model})`)
+    } catch (err) {
+      this.cachePrewarmedFor = null
+      log(`Prompt-cache prewarm skipped: ${(err as Error).message}`)
+    }
   }
 
   /**
@@ -974,6 +1036,12 @@ const SYSTEM_PROMPT_TEXT = [
   '    rax_focus_tab(tab="Nova")                                   → "pulling Nova up so you can see."',
   '',
   'You have direct access to: bash (shell), read / write / edit (files), grep / glob (search), rax_screenshot / rax_control_screen (see and drive the user\'s Mac), rax_list_tabs / rax_read_tab / rax_send_to_tab / rax_send_to_tab_and_wait / rax_focus_tab (talk to and dispatch work to the crew, passing the agent\'s NAME as `tab`), rax_describe_self (host metadata). `rax_open_tab` exists as a legacy escape hatch — DO NOT use it; the crew is fixed at five, dispatch to an idle one instead. Permissions are bypassed — confirm before anything clearly destructive.',
+  '',
+  'HANDING OFF TO THE CREW — when you call rax_send_to_tab or rax_send_to_tab_and_wait, you are briefing a teammate who did NOT hear the user. Carry their intent across, don\'t just paraphrase:',
+  '  • `prompt` — the concrete task you want done, in your words.',
+  '  • `userRequest` — what the user actually SAID, verbatim, whenever the dispatch came from a user ask. This is the safety net: if your task rewrite drifts, the crew member falls back to the user\'s real words. Omit only for work you started entirely on your own.',
+  '  • `context` — one or two lines of constraints, prior decisions, or file paths the task line alone doesn\'t capture ("user is on the notch-ui branch", "they already rejected the modal approach"). Skip when there\'s nothing extra.',
+  'Keep it tight — this is a brief, not a transcript. A trivial self-initiated dispatch can pass `prompt` alone.',
   '',
   'rax_screenshot — the OS cursor is HIDDEN; a RED RING + white dot marks the cursor. Use for FOLLOW-UP captures (verify a control_screen action, check a non-cursor display). The initial view is auto-attached when the user references their screen.',
   'rax_control_screen — coordinates are IMAGE-PIXEL coords of your most recent rax_screenshot (top-left origin). The tool converts to display points and posts real CGEvent events so clicks work in browsers, Electron apps, Slack, IDEs. ALWAYS screenshot first; re-capture if the screenshot is older than ~2 turns. If error="accessibility_denied", tell the user to approve Rax in System Settings → Privacy & Security → Accessibility.',

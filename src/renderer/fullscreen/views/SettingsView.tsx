@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react'
-import { Bell, Moon, Sun, Monitor as MonitorIcon, DownloadSimple, Robot, Lock, ClosedCaptioning, Cube, ArrowsClockwise, SignIn, SpeakerHigh, Rocket } from '@phosphor-icons/react'
-import { useSessionStore, AVAILABLE_MODELS, getModelDisplayLabel } from '../../stores/sessionStore'
+import { Bell, Moon, Sun, Monitor as MonitorIcon, DownloadSimple, Robot, Lock, ClosedCaptioning, Cube, ArrowsClockwise, SignIn, SpeakerHigh, Rocket, Palette, Play, Gauge } from '@phosphor-icons/react'
+import { useSessionStore, EFFORT_LEVELS, getModelDisplayLabel, useSelectableModels } from '../../stores/sessionStore'
 import { useThemeStore } from '../../theme'
-import { DEFAULT_MODEL_ID, type ClaudeInstanceInfo, type ClaudeLoginEvent, type UpdaterStatus } from '../../../shared/types'
+import { DEFAULT_MODEL_ID, isEffortLevel, type ClaudeInstanceInfo, type ClaudeLoginEvent, type UpdaterStatus } from '../../../shared/types'
 import { KOKORO_VOICES } from '../../../shared/kokoro-voices'
+import { MASCOT_COLORWAYS, getMascotColorway } from '../../../shared/mascot-colors'
 import { RaxCloudSection } from '../../components/RaxCloudSection'
 
 // Group voices into native <optgroup>s. American voices first because
@@ -47,6 +48,28 @@ export function SettingsView() {
   const setVoiceCaptionsEnabled = useThemeStore((s) => s.setVoiceCaptionsEnabled)
   const voiceId = useThemeStore((s) => s.voiceId)
   const setVoiceId = useThemeStore((s) => s.setVoiceId)
+  const mascotColorId = useThemeStore((s) => s.mascotColorId)
+  const setMascotColorId = useThemeStore((s) => s.setMascotColorId)
+
+  // Voice preview — plays a short sample in the selected voice without
+  // changing the configured one; the button holds a "Playing…" state for
+  // the sample's real duration (reported by main at playback start).
+  const [voicePreviewing, setVoicePreviewing] = useState(false)
+  const voicePreviewTimer = React.useRef(0)
+  const handleVoicePreview = () => {
+    window.clearTimeout(voicePreviewTimer.current)
+    setVoicePreviewing(true)
+    window.rax
+      .previewOrbVoice(voiceId)
+      .then((res) => {
+        const ms =
+          res?.ok && typeof res.durationMs === 'number' && res.durationMs > 0
+            ? Math.min(res.durationMs + 250, 8000)
+            : 2200
+        voicePreviewTimer.current = window.setTimeout(() => setVoicePreviewing(false), ms)
+      })
+      .catch(() => setVoicePreviewing(false))
+  }
 
   // On mount, ask the main process what voice it's currently using. If
   // the user (or a dev env override) set something different from
@@ -67,8 +90,26 @@ export function SettingsView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Same mount-time reconcile for the mascot colorway — main's JSON is the
+  // on-disk truth; localStorage is just this window's cache of it.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await window.rax?.getOrbMascotColor?.()
+        if (cancelled || !res?.color) return
+        if (res.color !== mascotColorId) setMascotColorId(res.color)
+      } catch {}
+    })()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const preferredModel = useSessionStore((s) => s.preferredModel)
+  const selectableModels = useSelectableModels()
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
+  const preferredEffort = useSessionStore((s) => s.preferredEffort)
+  const setPreferredEffort = useSessionStore((s) => s.setPreferredEffort)
   const permissionMode = useSessionStore((s) => s.permissionMode)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
   const staticInfo = useSessionStore((s) => s.staticInfo)
@@ -291,21 +332,72 @@ export function SettingsView() {
                   Which voice the orb uses to speak. All voices run on-device — no API calls.
                 </div>
               </div>
-              <select
-                className="fs-select"
-                value={voiceId}
-                onChange={(e) => setVoiceId(e.target.value)}
-              >
-                {VOICE_GROUPS.map((group) => (
-                  <optgroup key={group.label} label={group.label}>
-                    {group.voices.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} · {v.overallGrade}
-                      </option>
-                    ))}
-                  </optgroup>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  className="fs-button"
+                  onClick={handleVoicePreview}
+                  aria-label="Preview this voice"
+                  title="Hear a sample of the selected voice"
+                >
+                  {voicePreviewing ? <SpeakerHigh size={12} weight="fill" /> : <Play size={12} weight="fill" />}{' '}
+                  {voicePreviewing ? 'Playing…' : 'Play'}
+                </button>
+                <select
+                  className="fs-select"
+                  value={voiceId}
+                  onChange={(e) => setVoiceId(e.target.value)}
+                >
+                  {VOICE_GROUPS.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.voices.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name} · {v.overallGrade}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="fs-settings-row">
+              <Palette size={16} className="fs-settings-icon" />
+              <div className="fs-settings-label">
+                <div className="fs-settings-name">Mascot color</div>
+                <div className="fs-settings-help">
+                  The notch robot's visor. Skins borrow the agent crew's colors — wearing{' '}
+                  <strong>{getMascotColorway(mascotColorId).name}</strong>,{' '}
+                  {getMascotColorway(mascotColorId).tagline}.
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }} role="radiogroup" aria-label="Mascot color">
+                {MASCOT_COLORWAYS.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={mascotColorId === c.id}
+                    aria-label={`${c.name} — ${c.tagline}`}
+                    title={`${c.name} — ${c.tagline}`}
+                    onClick={() => setMascotColorId(c.id)}
+                    style={{
+                      width: 20,
+                      height: 20,
+                      padding: 0,
+                      borderRadius: '50%',
+                      border: 'none',
+                      cursor: 'pointer',
+                      background: `linear-gradient(135deg, ${c.visorLight}, ${c.visorDeep})`,
+                      boxShadow: 'inset 0 0 0 1px rgba(0, 0, 0, 0.12)',
+                      outline: mascotColorId === c.id ? `2px solid ${c.visorDeep}` : 'none',
+                      outlineOffset: 2,
+                      transform: mascotColorId === c.id ? 'scale(1.06)' : 'none',
+                      transition: 'transform 0.15s ease',
+                    }}
+                  />
                 ))}
-              </select>
+              </div>
             </div>
           </div>
         </div>
@@ -328,8 +420,28 @@ export function SettingsView() {
                 value={preferredModel || DEFAULT_MODEL_ID}
                 onChange={(e) => setPreferredModel(e.target.value)}
               >
-                {AVAILABLE_MODELS.map((m) => (
+                {selectableModels.map((m) => (
                   <option key={m.id} value={m.id}>{getModelDisplayLabel(m.id)}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="fs-settings-row">
+              <Gauge size={16} className="fs-settings-icon" />
+              <div className="fs-settings-label">
+                <div className="fs-settings-name">Effort</div>
+                <div className="fs-settings-help">
+                  How hard Claude thinks per turn. Higher = smarter but slower and pricier.
+                </div>
+              </div>
+              <select
+                className="fs-select"
+                value={preferredEffort || ''}
+                onChange={(e) => setPreferredEffort(isEffortLevel(e.target.value) ? e.target.value : null)}
+              >
+                <option value="">Default</option>
+                {EFFORT_LEVELS.map((lvl) => (
+                  <option key={lvl.id} value={lvl.id}>{lvl.label} — {lvl.hint}</option>
                 ))}
               </select>
             </div>

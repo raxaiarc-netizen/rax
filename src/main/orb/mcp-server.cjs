@@ -121,6 +121,18 @@ const ALL_TOOLS = [
     },
   },
   {
+    name: 'rax_set_dock',
+    description:
+      'Show, hide, or toggle the agents dock — the vertical crew dock (Max, Alex, Luna, Nova, Zara) on the edge of the screen. Pass visible=true to show, visible=false to hide, omit to toggle. Use when the user asks to open/close/show/hide the dock, or to tuck it away for a clean screen. (The dock surfaces automatically whenever you dispatch crew work.)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        visible: { type: 'boolean', description: 'true = show, false = hide. Omit to toggle.' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'rax_control_screen',
     description:
       'Drive the user\'s mouse and keyboard. ALWAYS take a rax_screenshot FIRST — clicks are calibrated against the most recent screenshot. Coordinates (x, y) are IMAGE-PIXEL coordinates of that screenshot (top-left origin) — i.e. the exact pixels you see in the picture. The tool internally converts those to global display points and posts real CGEvent mouse/keyboard events (not AppleScript), so clicks work reliably in browsers, Electron apps, Slack, IDEs, etc. Actions: "click" {x,y,button?}, "double_click" {x,y}, "type" {text}, "key" {key, modifiers?}, "scroll" {dy?,dx?} (real scroll-wheel — positive dy scrolls content down), "cursor_position". If the response comes back with error="accessibility_denied", tell the user out loud to approve Rax in System Settings → Privacy & Security → Accessibility, then retry. If calibrated=false comes back on a click, no screenshot has been taken yet this session — take one and retry.',
@@ -153,6 +165,7 @@ const TOOL_TO_PATH = {
   rax_describe_self: '/describe_self',
   rax_screenshot: '/screenshot',
   rax_control_screen: '/control_screen',
+  rax_set_dock: '/set_dock',
 }
 
 // Filter the advertised tool list per toolset. Tab sessions only see the

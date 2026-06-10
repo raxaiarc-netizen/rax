@@ -96,6 +96,16 @@ export interface CaptionAlignment {
   ends: number[]
 }
 
+/** Coarse loudness timeline of a synthesized utterance, used by the notch
+ *  waveform so it can move with the actual voice (TTS plays via afplay in
+ *  main, so the renderer never gets an audio stream to analyse). */
+export interface TtsEnvelope {
+  /** Milliseconds of audio each level covers. */
+  frameMs: number
+  /** Peak-normalized 0..1 loudness per frame (perceptual curve applied). */
+  levels: number[]
+}
+
 export interface SynthesizeResult {
   /** Path to the WAV file. Caller is responsible for `cleanup()`. */
   path: string
@@ -114,6 +124,9 @@ export interface SynthesizeResult {
    *  right after the WAV is written, so the caption pill can render its
    *  per-word highlighting. Returns an unsubscribe. */
   onAlignmentChange(cb: () => void): () => void
+  /** Loudness timeline of exactly the audio in `path` (post-trim), so a
+   *  playback-start timestamp is all the renderer needs to sync. */
+  envelope: TtsEnvelope
   cleanup: () => void
 }
 
@@ -489,6 +502,7 @@ export async function synthesizeToTempFile(
       : audio.audio.subarray(startIdx, endIdx + 1)
 
   const wav = encodeWav(trimmed, audio.sampling_rate)
+  const envelope = computeEnvelope(trimmed, audio.sampling_rate)
   const duration = trimmed.length / audio.sampling_rate
   // Char 0's start time is 0 because we've already trimmed leading
   // silence from the audio. The cushion we kept (30 ms) is small enough
@@ -534,5 +548,34 @@ export async function synthesizeToTempFile(
     resolveFinished()
   })
 
-  return { path: filePath, ready, finished, alignment, onAlignmentChange, cleanup }
+  return { path: filePath, ready, finished, alignment, onAlignmentChange, envelope, cleanup }
+}
+
+// 30ms frames ≈ 33 levels/sec — finer than the notch waveform's visual
+// smoothing can show, coarse enough that a 30s utterance is ~1000 numbers
+// over IPC. RMS per frame, peak-normalized, with a 0.7 power curve so
+// medium-loud syllables still register visually instead of being dwarfed
+// by the single loudest peak.
+const ENVELOPE_FRAME_MS = 30
+
+function computeEnvelope(samples: Float32Array, sampleRate: number): TtsEnvelope {
+  const frameLen = Math.max(1, Math.round((ENVELOPE_FRAME_MS / 1000) * sampleRate))
+  const frames = Math.ceil(samples.length / frameLen)
+  const levels = new Array<number>(frames)
+  let peak = 0
+  for (let f = 0; f < frames; f++) {
+    const start = f * frameLen
+    const end = Math.min(samples.length, start + frameLen)
+    let sumSq = 0
+    for (let i = start; i < end; i++) sumSq += samples[i] * samples[i]
+    const rms = Math.sqrt(sumSq / Math.max(1, end - start))
+    levels[f] = rms
+    if (rms > peak) peak = rms
+  }
+  if (peak > 0) {
+    for (let f = 0; f < frames; f++) {
+      levels[f] = Math.round(Math.pow(levels[f] / peak, 0.7) * 100) / 100
+    }
+  }
+  return { frameMs: ENVELOPE_FRAME_MS, levels }
 }

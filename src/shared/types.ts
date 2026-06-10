@@ -250,6 +250,8 @@ export interface RunOptions {
   maxBudgetUsd?: number
   systemPrompt?: string
   model?: string
+  /** Claude CLI effort level (--effort). Omitted = CLI default. */
+  effort?: EffortLevel
   /** Path to RAX-scoped settings file with hook config (passed via --settings) */
   hookSettingsPath?: string
   /** Extra directories to add via --add-dir (session-preserving) */
@@ -351,12 +353,15 @@ export type MirrorAction =
   | { kind: 'directory-add'; tabId: string; directory: string }
   | { kind: 'directory-remove'; tabId: string; directory: string }
   | { kind: 'preferred-model'; model: string | null }
+  | { kind: 'preferred-effort'; effort: EffortLevel | null }
   | { kind: 'permission-mode'; mode: 'ask' | 'auto' | 'bypass' }
 
 export interface SessionSnapshot {
   tabs: TabState[]
   activeTabId: string
   preferredModel: string | null
+  /** Optional — absent in snapshots written before effort selection shipped. */
+  preferredEffort?: EffortLevel | null
   permissionMode: 'ask' | 'auto' | 'bypass'
 }
 
@@ -364,7 +369,25 @@ export interface SessionSnapshot {
 // Single source of truth for the model used when the user hasn't picked one,
 // and when subprocesses (orb, etc.) need an explicit fallback. Shared between
 // main and renderer.
-export const DEFAULT_MODEL_ID = 'claude-opus-4-7'
+export const DEFAULT_MODEL_ID = 'claude-opus-4-8'
+
+// ─── Effort ───
+// Mirrors the Claude CLI's --effort flag (how hard the model thinks per turn).
+// `null` preference means "CLI default" — we omit --effort entirely so the
+// spawn inherits whatever Claude Code ships as its default for the model.
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+export const EFFORT_LEVELS: ReadonlyArray<{ id: EffortLevel; label: string; hint: string }> = [
+  { id: 'low', label: 'Low', hint: 'Fastest, scoped tasks' },
+  { id: 'medium', label: 'Medium', hint: 'Cost-efficient balance' },
+  { id: 'high', label: 'High', hint: 'Most tasks' },
+  { id: 'xhigh', label: 'X-High', hint: 'Coding & agentic work' },
+  { id: 'max', label: 'Max', hint: 'Correctness over cost' },
+]
+
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return EFFORT_LEVELS.some((e) => e.id === value)
+}
 
 // ─── IPC Channel Names ───
 
@@ -478,10 +501,17 @@ export const IPC = {
   ORB_FORCE_LISTEN: 'rax:orb-force-listen',
   ORB_HOLD_START: 'rax:orb-hold-start',
   ORB_HOLD_END: 'rax:orb-hold-end',
-  ORB_SET_POSITION: 'rax:orb-set-position',
+  /** Main→orb renderer push: traits of the display under the island
+   *  ({ notched: boolean }) — sent on renderer-ready, summon, and display
+   *  reconfiguration so the island can adapt its geometry. */
+  ORB_DISPLAY_PROFILE: 'rax:orb-display-profile',
   ORB_TTS_SPEAK: 'rax:orb-tts-speak',
   ORB_TTS_CANCEL: 'rax:orb-tts-cancel',
   ORB_TTS_DONE: 'rax:orb-tts-done',
+  /** Main→orb push at playback start: loudness timeline of the WAV afplay
+   *  is now playing (`{ id, startedAtMs, frameMs, levels }`) so the notch
+   *  waveform tracks the real voice instead of a synthetic flow. */
+  ORB_TTS_LEVELS: 'rax:orb-tts-levels',
   /** Renderer→main invoke. Payload is a Kokoro voice id (e.g. `af_heart`).
    *  Main updates the live TTSManager and persists the choice to
    *  `<userData>/orb-tts-voice.json`. Returns `{ ok, voice }`; `ok=false`
@@ -493,6 +523,26 @@ export const IPC = {
    *  which can disagree with the persisted main-process state after the
    *  user uninstalls + reinstalls). */
   ORB_TTS_GET_VOICE: 'rax:orb-tts-get-voice',
+  /** Renderer→main invoke. Payload is a Kokoro voice id. Synthesizes a
+   *  short fixed sample line in THAT voice (without touching the configured
+   *  voice) and plays it — the "play" button next to the voice pickers.
+   *  A new preview supersedes the previous one and silences any orb speech
+   *  first. Returns `{ ok, durationMs }` so the button can show a playing
+   *  state for the sample's real length. */
+  ORB_TTS_PREVIEW: 'rax:orb-tts-preview',
+  /** Renderer→main invoke. Payload is a mascot colorway id (see
+   *  shared/mascot-colors.ts — Rax blue or one of the crew skins). Main
+   *  persists it to `<userData>/orb-mascot-color.json` and live-pushes it
+   *  to the orb window. Returns `{ ok, color }`; `ok=false` for unknown
+   *  ids or a failed disk write (same contract as ORB_TTS_SET_VOICE). */
+  ORB_SET_MASCOT_COLOR: 'rax:orb-set-mascot-color',
+  /** Renderer→main invoke, no payload. Returns `{ color }` — the mascot
+   *  colorway main currently holds, so the Settings swatches reflect the
+   *  on-disk truth on mount. */
+  ORB_GET_MASCOT_COLOR: 'rax:orb-get-mascot-color',
+  /** Main→orb renderer push: `{ colorId }` for the mascot's visor. Sent on
+   *  renderer-ready and whenever the Settings selection changes. */
+  ORB_MASCOT_COLOR: 'rax:orb-mascot-color',
   ORB_RENDERER_READY: 'rax:orb-renderer-ready',
   ORB_BUSY: 'rax:orb-busy',
   /** Renderer→main, fire-and-forget. Payload is the orb's current voice
@@ -575,6 +625,31 @@ export const IPC = {
   /** Main → dock renderer. Broadcast on every task_complete event so the
    *  dock can fire a toast notification independently of pill / fullscreen. */
   DOCK_AGENT_COMPLETED: 'rax:dock-agent-completed',
+  /** Main → dock renderer push: `{ autoHide }` — whether the dock is in
+   *  activity-driven mode (auto-shown, should tuck itself away when the
+   *  crew goes quiet) or pinned by explicit user intent. Sent after every
+   *  show. */
+  DOCK_MODE: 'rax:dock-mode',
+  /** Renderer (dock) → main, fire-and-forget. The quiet grace elapsed —
+   *  request a hide WITHOUT flipping user intent (the dock stays in 'auto'
+   *  mode for the next episode). Main routes it through the same animated
+   *  slide-out handshake as every other hide. */
+  DOCK_AUTO_HIDE: 'rax:dock-auto-hide',
+  /** Main → dock renderer push: glide the column off-screen, then ack with
+   *  DOCK_SLIDE_OUT_DONE. EVERY hide path (toggle, tray, rax_set_dock,
+   *  orb-companion, quiet-grace) goes through this so the dock never pops
+   *  out of existence. */
+  DOCK_SLIDE_OUT: 'rax:dock-slide-out',
+  /** Renderer (dock) → main: slide-out finished — safe to hide the window.
+   *  Main also has a fallback timer in case the renderer is wedged. */
+  DOCK_SLIDE_OUT_DONE: 'rax:dock-slide-out-done',
+  /** Renderer (orb) → main invoke, no payload. Toggle the agents dock and
+   *  return `{ ok, visible }` — drives the notch's dock toggle button. */
+  ORB_TOGGLE_DOCK: 'rax:orb-toggle-dock',
+  /** Main → orb renderer push: `{ visible }` whenever dock visibility
+   *  changes (toggle button, tray, orb tool, dock lifecycle) so the notch
+   *  button reflects truth no matter who flipped it. */
+  ORB_DOCK_VISIBLE: 'rax:orb-dock-visible',
 
   // ─── Auto-updater ───
   // Backed by `electron-updater` reading `latest-mac.yml` from the GitHub

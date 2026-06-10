@@ -115,7 +115,7 @@ export default async function DownloadPage() {
             </span>
             <HeroHeadline />
             <p className="text-[17px] sm:text-[18px] leading-relaxed text-muted max-w-[52ch]">
-              Five named agents, one ambient voice orb, a floating dock.
+              Five named agents, one living notch companion, a floating dock.
               Free to download — drag the DMG to Applications and you&rsquo;re in.
             </p>
             <div className="flex flex-wrap items-center gap-3 pt-1">

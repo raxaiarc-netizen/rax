@@ -4,6 +4,7 @@
  */
 import { create } from 'zustand'
 import { DEFAULT_KOKORO_VOICE, isValidVoice } from '../shared/kokoro-voices'
+import { DEFAULT_MASCOT_COLOR_ID, isValidMascotColor } from '../shared/mascot-colors'
 
 // ─── Color palettes ───
 
@@ -317,6 +318,10 @@ interface ThemeState {
   /** Kokoro voice id the orb uses for TTS. Persisted alongside the other
    *  settings; main process gets a copy via `setOrbVoice` IPC. */
   voiceId: string
+  /** Mascot visor colorway (shared/mascot-colors.ts). Persisted alongside
+   *  the other settings; main owns the on-disk truth via `setOrbMascotColor`
+   *  IPC and pushes it to the orb window. */
+  mascotColorId: string
   /** OS-reported dark mode — used when themeMode is 'system' */
   _systemIsDark: boolean
   setIsDark: (isDark: boolean) => void
@@ -325,6 +330,7 @@ interface ThemeState {
   setExpandedUI: (expanded: boolean) => void
   setVoiceCaptionsEnabled: (enabled: boolean) => void
   setVoiceId: (id: string) => void
+  setMascotColorId: (id: string) => void
   /** Called by OS theme change listener — updates system value */
   setSystemTheme: (isDark: boolean) => void
 }
@@ -356,6 +362,7 @@ interface PersistedSettings {
   expandedUI: boolean
   voiceCaptionsEnabled: boolean
   voiceId: string
+  mascotColorId: string
 }
 
 // Default voice id, kept as single-source-of-truth in shared/.
@@ -373,6 +380,9 @@ function loadSettings(): PersistedSettings {
         voiceCaptionsEnabled:
           typeof parsed.voiceCaptionsEnabled === 'boolean' ? parsed.voiceCaptionsEnabled : true,
         voiceId: typeof parsed.voiceId === 'string' ? parsed.voiceId : DEFAULT_VOICE_ID,
+        mascotColorId: isValidMascotColor(parsed.mascotColorId)
+          ? parsed.mascotColorId
+          : DEFAULT_MASCOT_COLOR_ID,
       }
     }
   } catch {}
@@ -382,6 +392,7 @@ function loadSettings(): PersistedSettings {
     expandedUI: false,
     voiceCaptionsEnabled: true,
     voiceId: DEFAULT_VOICE_ID,
+    mascotColorId: DEFAULT_MASCOT_COLOR_ID,
   }
 }
 
@@ -399,6 +410,7 @@ function persistFromState(s: ThemeState): void {
     expandedUI: s.expandedUI,
     voiceCaptionsEnabled: s.voiceCaptionsEnabled,
     voiceId: s.voiceId,
+    mascotColorId: s.mascotColorId,
   })
 }
 
@@ -409,6 +421,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   expandedUI: saved.expandedUI,
   voiceCaptionsEnabled: saved.voiceCaptionsEnabled,
   voiceId: saved.voiceId,
+  mascotColorId: saved.mascotColorId,
   _systemIsDark: true,
   setIsDark: (isDark) => {
     set({ isDark })
@@ -479,6 +492,44 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
         set({ voiceId: prev })
         // eslint-disable-next-line no-console
         console.warn(`[rax] voice IPC failed:`, err)
+      }
+    })()
+  },
+  setMascotColorId: (id) => {
+    // Same contract as setVoiceId: validate, apply optimistically for
+    // instant swatch feedback, persist only after main confirms, roll back
+    // on rejection/IPC failure so localStorage never disagrees with the
+    // main-process file.
+    if (!isValidMascotColor(id)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[rax] refusing unknown mascot color: ${id}`)
+      return
+    }
+    const prev = get().mascotColorId
+    set({ mascotColorId: id })
+    const api = (window as any).rax
+    if (!api?.setOrbMascotColor) {
+      persistFromState(get())
+      return
+    }
+    void (async () => {
+      try {
+        const res = await api.setOrbMascotColor(id)
+        if (res?.ok) {
+          persistFromState(get())
+        } else {
+          if (res?.color && typeof res.color === 'string' && isValidMascotColor(res.color)) {
+            set({ mascotColorId: res.color })
+          } else {
+            set({ mascotColorId: prev })
+          }
+          // eslint-disable-next-line no-console
+          console.warn(`[rax] mascot color change rejected: ${res?.error ?? 'unknown'}`)
+        }
+      } catch (err) {
+        set({ mascotColorId: prev })
+        // eslint-disable-next-line no-console
+        console.warn(`[rax] mascot color IPC failed:`, err)
       }
     })()
   },

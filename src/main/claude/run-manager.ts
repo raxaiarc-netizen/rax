@@ -191,6 +191,11 @@ export class RunManager extends EventEmitter {
     // For kimi-* the CLI's own model validator rejects the id before any
     // request is sent. We omit --model and rely on the ANTHROPIC_*_MODEL
     // env vars set by buildClaudeEnv to route the spawn to Moonshot.
+    // Effort is Anthropic-only — the Moonshot proxy doesn't understand the
+    // CLI's effort plumbing, so skip it for kimi-* spawns too.
+    if (options.effort && !(options.model || '').startsWith('kimi-')) {
+      args.push('--effort', options.effort)
+    }
     if (options.addDirs && options.addDirs.length > 0) {
       for (const dir of options.addDirs) {
         args.push('--add-dir', dir)

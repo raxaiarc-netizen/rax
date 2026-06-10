@@ -471,39 +471,246 @@ html, body {
 .caret-light { background: var(--cream); }
 @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
-/* ─── Orb (the voice indicator, light theme) ─── */
-.orb {
+/* ─── Mascot showcase (the big guy under the hero) ─── */
+.mh-stage {
   position: relative;
-  width: 88px;
-  height: 88px;
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at 35% 28%, #ffffff 0%, #7da1ff 45%, var(--lime-deep) 100%);
-  box-shadow:
-    inset 0 0 30px rgba(255, 255, 255, 0.45),
-    inset 0 0 8px rgba(255, 255, 255, 0.6),
-    0 14px 38px -6px rgba(30, 63, 196, 0.45),
-    0 0 80px -12px rgba(51, 98, 255, 0.55);
-  animation: orb-breathe 4.2s ease-in-out infinite;
+  max-width: 1000px;
+  margin: 0 auto;
+  height: clamp(360px, 50vw, 620px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.orb::after {
-  content: "";
+/* Concentric rings, faint — the GeniAI-style orbit lines. */
+.mh-ring {
   position: absolute;
-  inset: -10px;
   border-radius: 50%;
-  border: 1px solid rgba(30, 63, 196, 0.25);
-  animation: orb-ring 4.2s ease-in-out infinite;
+  border: 1px solid var(--line);
+  pointer-events: none;
 }
-.orb-sm { width: 48px; height: 48px; }
-.orb-lg { width: 160px; height: 160px; }
-@keyframes orb-breathe {
-  0%, 100% { transform: scale(1); filter: brightness(1); }
-  50%      { transform: scale(1.04); filter: brightness(1.08); }
+.mh-ring-1 { width: clamp(260px, 36vw, 440px); height: clamp(260px, 36vw, 440px); border-color: var(--line-3); }
+.mh-ring-2 { width: clamp(400px, 56vw, 680px); height: clamp(400px, 56vw, 680px); border-color: var(--line-2); }
+.mh-ring-3 { width: clamp(540px, 76vw, 920px); height: clamp(540px, 76vw, 920px); border-color: rgba(12, 18, 40, 0.07); }
+/* Tiny coloured satellites riding the rings. */
+.mh-dot-orbit {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.9), 0 4px 10px -2px rgba(12, 18, 40, 0.25);
+  pointer-events: none;
 }
-@keyframes orb-ring {
-  0%, 100% { opacity: 0.35; transform: scale(1); }
-  50%      { opacity: 0.6;  transform: scale(1.06); }
+/* Soft tinted halo so the white head reads on the white page. */
+.mh-halo {
+  position: absolute;
+  width: clamp(280px, 40vw, 500px);
+  height: clamp(280px, 40vw, 500px);
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(51, 98, 255, 0.12) 0%, rgba(51, 98, 255, 0.04) 55%, transparent 75%);
+  pointer-events: none;
 }
+/* The black island he sits on — same surface as the notch (and the brand
+   mark): pure black, faint top edge-light, soft drop. White head reads
+   exactly as it does in the menu bar. */
+.mh-island {
+  position: relative;
+  width: clamp(210px, 29vw, 360px);
+  height: clamp(210px, 29vw, 360px);
+  border-radius: 26%;
+  /* Faint visor-blue uplight from below so the black reads as a lit surface,
+     not a flat slab. */
+  background:
+    radial-gradient(110% 85% at 50% 88%, rgba(61, 125, 248, 0.28) 0%, rgba(61, 125, 248, 0.06) 42%, transparent 65%),
+    #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 36px 80px -24px rgba(12, 18, 40, 0.5),
+    0 12px 30px -12px rgba(51, 98, 255, 0.25);
+  z-index: 1;
+}
+/* He fills the island — big presence, minimal dead black. */
+.mh-mascot {
+  width: 90%;
+  height: 90%;
+}
+.mh-float {
+  position: absolute;
+  z-index: 2;
+  animation: mh-float 6s ease-in-out infinite;
+}
+@keyframes mh-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-13px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mh-float { animation: none; }
+}
+.mh-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: var(--paper);
+  border: 1px solid var(--line-2);
+  box-shadow: 0 18px 44px -18px rgba(12, 18, 40, 0.28);
+}
+.mh-you {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--line-2);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.mh-face {
+  display: block;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--ink-900);
+  flex-shrink: 0;
+}
+.mh-face img { width: 100%; height: 100%; object-fit: cover; }
+.mh-avatar {
+  display: block;
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--ink-900);
+  border: 4px solid #ffffff;
+  box-shadow: 0 16px 38px -14px rgba(12, 18, 40, 0.32);
+}
+.mh-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.mh-avatar-sm { width: 60px; height: 60px; }
+.mh-card-tight { padding: 9px 14px; border-radius: 12px; }
+/* The handwritten "poke him" note, arrow aimed at the island. */
+.mh-note {
+  position: absolute;
+  left: 17%;
+  bottom: -1%;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  z-index: 2;
+  pointer-events: none;
+}
+.mh-note-arrow {
+  margin-bottom: 26px;
+}
+
+/* ─── Notch mock (the voice agent demo) ─── */
+/* A miniature top-of-screen: wallpaper, then the pure-black bar hanging from
+   the top edge — same glass drop shadow the app uses when the bar is open. */
+.nm-screen {
+  position: relative;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  background:
+    radial-gradient(120% 90% at 18% 0%, #dbe6ff 0%, transparent 55%),
+    radial-gradient(110% 90% at 88% 12%, #ecdfff 0%, transparent 58%),
+    linear-gradient(160deg, #e8eeff 0%, #f3e9ff 55%, #ffe6f0 100%);
+  min-height: 168px;
+  padding-bottom: 18px;
+}
+.nm-bar {
+  display: flex;
+  align-items: center;
+  width: min(86%, 320px);
+  height: 38px;
+  margin: 0 auto;
+  padding: 0 14px;
+  background: #000;
+  border-radius: 0 0 14px 14px;
+  box-shadow:
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.09),
+    0 5px 16px rgba(0, 0, 0, 0.38);
+  cursor: default;
+}
+.nm-wing { display: flex; align-items: center; flex: 1 1 0; min-width: 0; }
+.nm-wing.nm-left  { justify-content: flex-start; }
+.nm-wing.nm-right { justify-content: flex-end; gap: 8px; }
+/* The hardware notch the bar wraps around — stays empty. */
+.nm-gap { flex: 0 0 64px; }
+.nm-caption {
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: rgba(255, 255, 255, 0.88);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Five slim bars, mic-teal while listening, white while speaking. */
+.nm-wave { display: inline-flex; align-items: center; gap: 2.5px; height: 16px; }
+.nm-wave span {
+  width: 2.5px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.28);
+  transition: background-color 0.2s ease;
+}
+.nm-wave.mic span, .nm-wave.voice span {
+  animation: nm-bounce 0.9s ease-in-out infinite;
+}
+.nm-wave.mic span   { background: #35d3c8; }
+.nm-wave.voice span { background: rgba(255, 255, 255, 0.92); }
+.nm-wave span:nth-child(1) { animation-delay: 0s;    }
+.nm-wave span:nth-child(2) { animation-delay: 0.14s; }
+.nm-wave span:nth-child(3) { animation-delay: 0.28s; }
+.nm-wave span:nth-child(4) { animation-delay: 0.1s;  }
+.nm-wave span:nth-child(5) { animation-delay: 0.22s; }
+@keyframes nm-bounce {
+  0%, 100% { height: 3px; }
+  35%      { height: 13px; }
+  65%      { height: 7px; }
+}
+/* A window peeking from under the bar, for scale. */
+.nm-window {
+  display: flex;
+  gap: 5px;
+  width: min(72%, 260px);
+  margin: 26px auto 0;
+  padding: 10px;
+  border-radius: 12px 12px 0 0;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(4px);
+  min-height: 56px;
+}
+.nm-window span { width: 9px; height: 9px; border-radius: 50%; }
+.nm-window span:nth-child(1) { background: var(--coral); }
+.nm-window span:nth-child(2) { background: var(--butter); }
+.nm-window span:nth-child(3) { background: var(--lime); }
+/* Expression chips */
+.nm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.nm-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--paper);
+  color: var(--muted);
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.nm-chip:hover { color: var(--ink); border-color: var(--line-3); }
+.nm-chip.is-active { background: var(--ink); border-color: var(--ink); color: var(--cream); }
 
 /* ─── Dock (mini) ─── */
 .dock {

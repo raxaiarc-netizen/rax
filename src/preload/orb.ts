@@ -18,13 +18,21 @@ const CHANNELS = {
   ORB_HOLD_END: 'rax:orb-hold-end',
   TRANSCRIBE_AUDIO: 'rax:transcribe-audio',
   SET_IGNORE_MOUSE_EVENTS: 'rax:set-ignore-mouse-events',
-  ORB_SET_POSITION: 'rax:orb-set-position',
+  ORB_DISPLAY_PROFILE: 'rax:orb-display-profile',
   ORB_TTS_SPEAK: 'rax:orb-tts-speak',
   ORB_TTS_CANCEL: 'rax:orb-tts-cancel',
   ORB_TTS_DONE: 'rax:orb-tts-done',
+  ORB_TTS_LEVELS: 'rax:orb-tts-levels',
   ORB_RENDERER_READY: 'rax:orb-renderer-ready',
   ORB_BUSY: 'rax:orb-busy',
   ORB_VOICE_STATE: 'rax:orb-voice-state',
+  ORB_MASCOT_COLOR: 'rax:orb-mascot-color',
+  ORB_TTS_SET_VOICE: 'rax:orb-tts-set-voice',
+  ORB_TTS_GET_VOICE: 'rax:orb-tts-get-voice',
+  ORB_SET_MASCOT_COLOR: 'rax:orb-set-mascot-color',
+  ORB_TOGGLE_DOCK: 'rax:orb-toggle-dock',
+  ORB_DOCK_VISIBLE: 'rax:orb-dock-visible',
+  ORB_TTS_PREVIEW: 'rax:orb-tts-preview',
 } as const
 
 export interface OrbAPI {
@@ -48,8 +56,28 @@ export interface OrbAPI {
   onHoldEnd(callback: () => void): () => void
   /** "The host hid the window" — fired when the user explicitly dismissed (Esc / shortcut). */
   onDismissed(callback: () => void): () => void
-  /** Absolute window placement — bypasses macOS work-area clamps. */
-  setBounds(x: number, y: number): void
+  /** Display traits under the island (hardware notch or not) — pushed by main
+   *  on create, summon, and display reconfiguration. */
+  onDisplayProfile(callback: (profile: { notched: boolean }) => void): () => void
+  /** Mascot visor colorway (see shared/mascot-colors.ts) — pushed by main on
+   *  renderer-ready and whenever the Settings selection changes. */
+  onMascotColor(callback: (payload: { colorId: string }) => void): () => void
+  /** The notch's inline settings panel writes through the same main-process
+   *  handlers the fullscreen Settings view uses — one on-disk truth. */
+  setVoice(voiceId: string): Promise<{ ok: boolean; voice?: string; error?: string }>
+  getVoice(): Promise<{ voice: string }>
+  /** Play a short sample in the given voice WITHOUT changing the configured
+   *  voice — the panel's play button. Returns the sample duration. */
+  previewVoice(voiceId: string): Promise<{ ok: boolean; durationMs?: number; error?: string }>
+  /** Main persists + pushes the change back via onMascotColor, so the
+   *  swatch selection and the visor stay slaved to one source of truth. */
+  setMascotColor(colorId: string): Promise<{ ok: boolean; color?: string; error?: string }>
+  /** Toggle the agents dock window. Returns the resulting visibility. */
+  toggleDock(): Promise<{ ok: boolean; visible: boolean }>
+  /** Dock visibility pushes — sent on renderer-ready and whenever ANY
+   *  surface (notch button, tray, the orb's own rax_set_dock tool) flips
+   *  the dock, so the notch toggle always reflects truth. */
+  onDockVisible(callback: (payload: { visible: boolean }) => void): () => void
   /** OS-level click-through for transparent regions. */
   setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void
   /** Speak a sentence via the system `say` command. Returns an id; `tts:done` arrives when finished. */
@@ -58,6 +86,12 @@ export interface OrbAPI {
   ttsCancel(): Promise<void>
   /** Subscribe to TTS completion (per-id). */
   onTtsDone(callback: (id: string) => void): () => void
+  /** Loudness timeline of the utterance afplay just started playing —
+   *  `levels[i]` covers `frameMs` ms of audio starting `startedAtMs + i*frameMs`
+   *  (Date.now() domain). Drives the notch waveform during speech. */
+  onTtsLevels(
+    callback: (payload: { id: string; startedAtMs: number; frameMs: number; levels: number[] }) => void,
+  ): () => void
   /** Tell main the renderer has wired up its IPC listeners — main flushes any queued force-listen. */
   rendererReady(): void
   /** Tell main whether the renderer is busy (recording / thinking / talking). Main uses this
@@ -100,7 +134,26 @@ const api: OrbAPI = {
     ipcRenderer.on(CHANNELS.ORB_DISMISSED, handler)
     return () => ipcRenderer.removeListener(CHANNELS.ORB_DISMISSED, handler)
   },
-  setBounds: (x, y) => ipcRenderer.send(CHANNELS.ORB_SET_POSITION, x, y),
+  onDisplayProfile: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, profile: { notched: boolean }) => callback(profile)
+    ipcRenderer.on(CHANNELS.ORB_DISPLAY_PROFILE, handler)
+    return () => ipcRenderer.removeListener(CHANNELS.ORB_DISPLAY_PROFILE, handler)
+  },
+  onMascotColor: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { colorId: string }) => callback(payload)
+    ipcRenderer.on(CHANNELS.ORB_MASCOT_COLOR, handler)
+    return () => ipcRenderer.removeListener(CHANNELS.ORB_MASCOT_COLOR, handler)
+  },
+  setVoice: (voiceId) => ipcRenderer.invoke(CHANNELS.ORB_TTS_SET_VOICE, voiceId),
+  getVoice: () => ipcRenderer.invoke(CHANNELS.ORB_TTS_GET_VOICE),
+  previewVoice: (voiceId) => ipcRenderer.invoke(CHANNELS.ORB_TTS_PREVIEW, voiceId),
+  setMascotColor: (colorId) => ipcRenderer.invoke(CHANNELS.ORB_SET_MASCOT_COLOR, colorId),
+  toggleDock: () => ipcRenderer.invoke(CHANNELS.ORB_TOGGLE_DOCK),
+  onDockVisible: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { visible: boolean }) => callback(payload)
+    ipcRenderer.on(CHANNELS.ORB_DOCK_VISIBLE, handler)
+    return () => ipcRenderer.removeListener(CHANNELS.ORB_DOCK_VISIBLE, handler)
+  },
   setIgnoreMouseEvents: (ignore, options) =>
     ipcRenderer.send(CHANNELS.SET_IGNORE_MOUSE_EVENTS, ignore, options || {}),
   ttsSpeak: (text) => ipcRenderer.invoke(CHANNELS.ORB_TTS_SPEAK, text),
@@ -109,6 +162,14 @@ const api: OrbAPI = {
     const handler = (_e: Electron.IpcRendererEvent, id: string) => callback(id)
     ipcRenderer.on(CHANNELS.ORB_TTS_DONE, handler)
     return () => ipcRenderer.removeListener(CHANNELS.ORB_TTS_DONE, handler)
+  },
+  onTtsLevels: (callback) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      payload: { id: string; startedAtMs: number; frameMs: number; levels: number[] },
+    ) => callback(payload)
+    ipcRenderer.on(CHANNELS.ORB_TTS_LEVELS, handler)
+    return () => ipcRenderer.removeListener(CHANNELS.ORB_TTS_LEVELS, handler)
   },
   rendererReady: () => ipcRenderer.send(CHANNELS.ORB_RENDERER_READY),
   setBusy: (busy) => ipcRenderer.send(CHANNELS.ORB_BUSY, !!busy),

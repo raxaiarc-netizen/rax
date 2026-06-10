@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Warning } from '@phosphor-icons/react'
-import { useSessionStore, AVAILABLE_MODELS, getModelDisplayLabel } from '../stores/sessionStore'
+import { useSessionStore, AVAILABLE_MODELS, EFFORT_LEVELS, getModelDisplayLabel, useSelectableModels } from '../stores/sessionStore'
 import { DEFAULT_MODEL_ID } from '../../shared/types'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors } from '../theme'
@@ -12,6 +12,9 @@ import { useColors } from '../theme'
 function ModelPicker() {
   const preferredModel = useSessionStore((s) => s.preferredModel)
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
+  const preferredEffort = useSessionStore((s) => s.preferredEffort)
+  const setPreferredEffort = useSessionStore((s) => s.setPreferredEffort)
+  const selectableModels = useSelectableModels()
   const tab = useSessionStore(
     (s) => s.tabs.find((t) => t.id === s.activeTabId),
     (a, b) => a === b || (!!a && !!b && a.status === b.status && a.sessionModel === b.sessionModel),
@@ -104,7 +107,7 @@ function ModelPicker() {
           }}
         >
           <div className="py-1">
-            {AVAILABLE_MODELS.map((m) => {
+            {selectableModels.map((m) => {
               const isSelected = preferredModel === m.id || (!preferredModel && m.id === DEFAULT_MODEL_ID)
               return (
                 <button
@@ -117,6 +120,29 @@ function ModelPicker() {
                   }}
                 >
                   {m.label}
+                  {isSelected && <Check size={12} style={{ color: colors.accent }} />}
+                </button>
+              )
+            })}
+            <div
+              className="px-3 pt-2 pb-1 text-[9px] uppercase tracking-wider"
+              style={{ color: colors.textTertiary, borderTop: `1px solid ${colors.popoverBorder}`, marginTop: 4 }}
+            >
+              Effort
+            </div>
+            {[{ id: null as null, label: 'Default' }, ...EFFORT_LEVELS].map((e) => {
+              const isSelected = preferredEffort === e.id
+              return (
+                <button
+                  key={e.id ?? 'default'}
+                  onClick={() => { setPreferredEffort(e.id); setOpen(false) }}
+                  className="w-full flex items-center justify-between px-3 py-1.5 text-[11px] transition-colors"
+                  style={{
+                    color: isSelected ? colors.textPrimary : colors.textSecondary,
+                    fontWeight: isSelected ? 600 : 400,
+                  }}
+                >
+                  {e.label}
                   {isSelected && <Check size={12} style={{ color: colors.accent }} />}
                 </button>
               )

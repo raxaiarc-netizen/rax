@@ -350,7 +350,12 @@ export function buildClaudeEnv(extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   // env so the CLI emits kimi-k2.6 to whatever base URL is active — the Rax
   // cloud proxy then forwards kimi-* upstream to Moonshot. No local key
   // needed; only the model NAME is set here (creds come from Rax cloud).
-  if (requestedModel.startsWith('kimi-')) {
+  // Only the bundled "Rax's Claude" rides the Rax proxy — pinning kimi-* in
+  // system mode would send a Moonshot id to Anthropic with the user's own
+  // creds and 4xx. The pickers hide Rax Default in system mode, but a stale
+  // persisted/mirrored selection can still reach here; ignore it and let the
+  // CLI use its normal default.
+  if (requestedModel.startsWith('kimi-') && instance.mode === 'bundled') {
     env.ANTHROPIC_MODEL = requestedModel
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = requestedModel
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = requestedModel

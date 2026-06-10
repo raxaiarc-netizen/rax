@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { VoiceOrb, type OrbState } from './VoiceOrb'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Notch, type TtsEnvelopeFrames } from './Notch'
+import { NotchSettings } from './NotchSettings'
+import { DEFAULT_KOKORO_VOICE } from '../../shared/kokoro-voices'
+import { DEFAULT_MASCOT_COLOR_ID } from '../../shared/mascot-colors'
 import {
   playBargeIn,
   playError,
@@ -7,6 +10,7 @@ import {
   playListenEnd,
   playListenStart,
   playMishear,
+  playTurnDone,
 } from './earcons'
 
 declare global {
@@ -30,45 +34,46 @@ declare global {
 
 type VoiceState = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'talking' | 'error'
 
-const stateToOrb = (s: VoiceState): OrbState => {
-  if (s === 'listening' || s === 'transcribing') return 'listening'
-  if (s === 'thinking' || s === 'talking') return 'talking'
-  return 'idle'
-}
-
-const STATE_LABEL: Record<VoiceState, string> = {
-  idle: '',
-  listening: 'listening',
-  transcribing: 'transcribing',
-  thinking: 'thinking',
-  talking: 'speaking',
-  error: 'error',
-}
-
 // VAD tuning — normalised 0..1 RMS values.
 const VAD_SPEECH_RMS = 0.045
 const VAD_SILENCE_RMS = 0.018
-const VAD_SILENCE_HOLD_MS = 850
+// How long a silence must last before the turn ends. 600ms (down from 850)
+// is affordable because speculative transcription (below) eats the Whisper
+// cost INSIDE this window — the hold itself is now the only post-speech
+// wait, so it can't hide other latency and earns a tighter value.
+const VAD_SILENCE_HOLD_MS = 600
+// Kick off Whisper THIS far into a candidate silence, on the audio captured
+// so far. If the silence holds, the transcript is ready (or nearly so) the
+// moment the turn ends — the "transcribing" phase collapses to ~0ms. If the
+// user resumes talking instead, the speculative run is discarded. The only
+// audio a surviving speculation misses is trailing silence, so accuracy is
+// unaffected.
+const SPECULATIVE_TRANSCRIBE_MS = 250
 const MIN_SPEECH_MS = 350
 const MAX_RECORD_MS = 30_000
+// Nothing said: close quietly with the mishear cue instead of trapping the
+// user until the 30s cap (which then reads as "you talked too long" — wrong
+// for an accidental activation). Hold-to-speak ignores this; the key release
+// is authoritative there.
+const NO_SPEECH_TIMEOUT_MS = 7_000
 
 // Barge-in VAD (during thinking + TTS) — higher threshold so speaker bleed
 // during talking doesn't trip it.
 const BARGE_IN_RMS = 0.08
 const BARGE_IN_MIN_MS = 220
 
-const ORB_HIT_RADIUS = 78
-
-// Transcript ring buffer — max entries shown.
-const MAX_TRANSCRIPT = 30
-
-interface TranscriptEntry {
-  id: string
-  role: 'user' | 'orb' | 'tool'
-  text: string
+// Everything captured by the barge mic from the moment voice first crosses
+// the threshold, so the user's interruption reaches Whisper with its onset
+// intact (see the pre-roll recorder in the barge-in effect). Handed to
+// startRecording when the barge-in confirms.
+interface BargeHandoff {
+  stream: MediaStream
+  recorder: MediaRecorder | null
+  chunks: Blob[]
+  ctx: AudioContext | null
+  analyser: AnalyserNode | null
+  voiceAt: number | null
 }
-
-const uid = () => Math.random().toString(36).slice(2, 10)
 
 // ─── Phrase-boundary chunker ───
 // We want audible output ASAP — waiting for a sentence terminator means a
@@ -141,6 +146,51 @@ function endsInAbbrev(s: string): boolean {
   return ABBREV_RE.test(trimmed) || /\b[A-Z]\.$/.test(trimmed)
 }
 
+// One Segmenter for the app's lifetime — findCut runs on every streamed
+// token batch, and constructing a fresh Intl.Segmenter (locale lookup +
+// ICU setup) per call is the hot path's only allocation of note.
+const sentenceSegmenter: Intl.Segmenter | null = (() => {
+  try {
+    const Segmenter = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter
+    return Segmenter ? new Segmenter('en', { granularity: 'sentence' }) : null
+  } catch {
+    return null
+  }
+})()
+
+// The system prompt asks for plain spoken English, but models still leak
+// markdown (especially the non-Claude ones routed through the proxy).
+// Kokoro reads "**bold**" as "asterisk asterisk…" territory and URLs as
+// letter soup, so strip formatting down to the words before synthesis.
+// The sanitized text also feeds the caption pill via tts_segment, so the
+// subtitles clean up for free.
+function sanitizeForSpeech(text: string): string {
+  return (
+    text
+      // Fence markers (content between them still reads — dropping it would
+      // silently swallow words; claude is prompted not to emit blocks at all).
+      .replace(/```[a-zA-Z0-9_-]*/g, ' ')
+      // Images & links → their label text.
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      // Inline code, bold, underscores-as-bold.
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      // A bold span split across two streamed pieces leaves an unpaired
+      // marker behind — drop it (single * stays: it can be real math).
+      .replace(/\*\*/g, ' ')
+      .replace(/`/g, '')
+      // Bullet / heading / quote markers at line starts.
+      .replace(/^[ \t]*[-*•][ \t]+/gm, '')
+      .replace(/^#{1,6}[ \t]+/gm, '')
+      .replace(/^>[ \t]+/gm, '')
+      // Bare URLs are unreadable aloud.
+      .replace(/https?:\/\/\S+/g, 'the link')
+      .replace(/[ \t]{2,}/g, ' ')
+  )
+}
+
 // Returns the index (one past the boundary char) where we should cut, or -1
 // if no boundary worth taking is in `s` yet.
 // `requireMinForSentence`: when true, sentence-terminator cuts must also
@@ -152,11 +202,9 @@ function findCut(s: string, minLen: number, requireMinForSentence: boolean): num
   //    splits "Mr.", "U.S.", "e.g." as their own sentences). We walk the
   //    segments greedily, merging any that end in a known abbreviation, and
   //    only accept a cut once we have a "real" sentence followed by another.
-  const Segmenter = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter
-  if (Segmenter) {
+  if (sentenceSegmenter) {
     try {
-      const seg = new Segmenter('en', { granularity: 'sentence' })
-      const segs = Array.from(seg.segment(s))
+      const segs = Array.from(sentenceSegmenter.segment(s))
       if (segs.length >= 2) {
         // Merge until the FIRST cut lands on a non-abbreviation. The runaway
         // case (every segment ends in an abbreviation) means we never cut
@@ -211,13 +259,37 @@ function findCut(s: string, minLen: number, requireMinForSentence: boolean): num
   return -1
 }
 
+// ─── Live-captions setting (shared localStorage) ───
+// Same `rax-settings` key the fullscreen Settings and the caption pill use —
+// all windows share one Electron origin. Merge-writes so the other settings
+// in the blob survive; the pill's `storage` listener picks the flip up live,
+// and the fullscreen themeStore reconciles from the same key on next boot.
+const RAX_SETTINGS_KEY = 'rax-settings'
+
+function readCaptionsEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem(RAX_SETTINGS_KEY)
+    if (!raw) return true
+    const parsed = JSON.parse(raw)
+    return typeof parsed.voiceCaptionsEnabled === 'boolean' ? parsed.voiceCaptionsEnabled : true
+  } catch {
+    return true
+  }
+}
+
+function writeCaptionsEnabled(enabled: boolean): void {
+  try {
+    const raw = localStorage.getItem(RAX_SETTINGS_KEY)
+    const parsed = raw ? JSON.parse(raw) : {}
+    parsed.voiceCaptionsEnabled = enabled
+    localStorage.setItem(RAX_SETTINGS_KEY, JSON.stringify(parsed))
+  } catch {}
+}
+
 export default function App() {
   const [state, setState] = useState<VoiceState>('idle')
   const stateRef = useRef<VoiceState>('idle')
   const [errorText, setErrorText] = useState<string | null>(null)
-  const [showTranscript, setShowTranscript] = useState(false)
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([])
-  const [labelKey, setLabelKey] = useState(0) // forces label re-animation on every state change
   // Latest tool name shown as a live caption while the orb is "thinking" — fixes
   // the otherwise-opaque thinking state on heavy turns (10s+).
   const [currentTool, setCurrentTool] = useState<string | null>(null)
@@ -226,6 +298,106 @@ export default function App() {
   // the flash window so a back-to-back attachment within the same ms still
   // re-arms the effect.
   const [flashAt, setFlashAt] = useState<number | null>(null)
+  // Whether the display under the island has a hardware notch. Main detects
+  // it (menu-bar inset heuristic) and pushes on create/recenter; the island
+  // shrinks its center dead-zone and parked width on notchless displays so
+  // it reads as a compact pill instead of a fake notch with a hollow middle.
+  const [notched, setNotched] = useState(true)
+
+  useEffect(() => {
+    return window.orb.onDisplayProfile((profile) => {
+      setNotched(profile.notched)
+    })
+  }, [])
+
+  // Mascot visor colorway — main pushes the persisted choice on renderer-
+  // ready and live on every Settings change. Default (Rax blue) until the
+  // first push lands.
+  const [mascotColor, setMascotColor] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    return window.orb.onMascotColor((payload) => {
+      setMascotColor(payload.colorId)
+    })
+  }, [])
+
+  // ─── Inline settings panel (gear on the bar) ───
+  // The island's own voice-agent controls: voice, live captions, colorway.
+  // Values hydrate when the panel opens — main's handlers are the on-disk
+  // truth for voice/color; captions live in the shared localStorage blob.
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [voiceId, setVoiceId] = useState<string>(DEFAULT_KOKORO_VOICE)
+  const [captionsEnabled, setCaptionsEnabled] = useState(true)
+
+  const toggleSettings = useCallback((openNext: boolean) => {
+    setSettingsOpen(openNext)
+    if (openNext) {
+      setCaptionsEnabled(readCaptionsEnabled())
+      window.orb
+        .getVoice()
+        .then((res) => {
+          if (res?.voice) setVoiceId(res.voice)
+        })
+        .catch(() => {})
+    }
+  }, [])
+
+  const handleVoiceChange = useCallback((id: string) => {
+    // Optimistic — the panel is ephemeral and re-hydrates from main on every
+    // open, so a failed write self-corrects next time.
+    setVoiceId(id)
+    void window.orb.setVoice(id).catch(() => {})
+  }, [])
+
+  const handleCaptionsChange = useCallback((enabled: boolean) => {
+    setCaptionsEnabled(enabled)
+    writeCaptionsEnabled(enabled)
+  }, [])
+
+  const handleColorChange = useCallback((id: string) => {
+    // Optimistic for instant swatch + visor feedback; main persists and
+    // pushes the confirmed value back through onMascotColor.
+    setMascotColor(id)
+    void window.orb.setMascotColor(id).catch(() => {})
+  }, [])
+
+  // ─── Agents-dock toggle (button beside the gear) ───
+  // Visibility truth lives in main and is pushed on renderer-ready plus
+  // every flip — from this button, the tray menu, Rax's own rax_set_dock
+  // tool, or the auto-show on crew dispatch — so the notch toggle never
+  // goes stale. Defaults false: the dock is hidden by default at start.
+  const [dockVisible, setDockVisible] = useState(false)
+  useEffect(() => {
+    return window.orb.onDockVisible((payload) => {
+      setDockVisible(payload.visible)
+    })
+  }, [])
+  const handleDockToggle = useCallback(() => {
+    window.orb
+      .toggleDock()
+      .then((res) => {
+        if (res && typeof res.visible === 'boolean') setDockVisible(res.visible)
+      })
+      .catch(() => {})
+  }, [])
+
+  // A turn starting (user or autonomous recap) reclaims the bar — the wave
+  // and status word need the wings back.
+  useEffect(() => {
+    if (settingsOpen && state !== 'idle' && state !== 'error') setSettingsOpen(false)
+  }, [settingsOpen, state])
+
+  // Loudness timeline of the utterance currently playing through afplay,
+  // pushed by main at playback start. A ref, not state — the waveform reads
+  // it inside its own rAF; re-rendering React per utterance buys nothing.
+  // Never cleared: a stale envelope self-disarms (its time window is in the
+  // past, so the wave falls back to the quiet baseline until fresh levels
+  // for the next utterance arrive).
+  const ttsEnvelopeRef = useRef<TtsEnvelopeFrames | null>(null)
+  useEffect(() => {
+    return window.orb.onTtsLevels((payload) => {
+      ttsEnvelopeRef.current = payload
+    })
+  }, [])
 
   // Recording refs
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -234,9 +406,30 @@ export default function App() {
   const recorderMimeRef = useRef<string>('audio/webm;codecs=opus')
   const recordCancelledRef = useRef(false)
   const recordCappedRef = useRef(false)
+  // Listening ended with zero detected speech — close with the gentle
+  // mishear cue instead of transcribing 7s of room tone.
+  const recordNoSpeechRef = useRef(false)
+  // Re-entrancy guard: a second startRecording while getUserMedia is in
+  // flight (double-click, hotkey + click race) would orphan the first
+  // stream — mic indicator stuck on with no recorder attached to it.
+  const recordStartingRef = useRef(false)
+  // Recording-session generation. Bumped by everything that invalidates an
+  // in-flight finalizeRecording (dismiss, reset, cancel-click, a new
+  // recording). finalizeRecording snapshots it before its awaits and bails
+  // when it moved — otherwise a dismissed orb still submits the turn and
+  // thinks/speaks invisibly with the mic indicator on.
+  const recordGenRef = useRef(0)
   // Hold-to-speak (Option+R) — when true, VAD silence/cap stops are
   // disabled; only the explicit ORB_HOLD_END from main ends the recording.
   const holdModeRef = useRef(false)
+  // In-flight speculative transcription, started mid-silence-hold on the
+  // audio captured so far. Nulled the instant any new voice lands (the
+  // utterance grew past the snapshot) and on every new recording.
+  // finalizeRecording adopts it when it survives; the promise resolves null
+  // on any failure so finalize falls back to the full transcription path.
+  const specRef = useRef<{
+    promise: Promise<{ error: string | null; transcript: string | null } | null>
+  } | null>(null)
 
   // VAD refs (during listening AND barge-in)
   const vadCtxRef = useRef<AudioContext | null>(null)
@@ -246,9 +439,9 @@ export default function App() {
   const vadLastVoiceAtRef = useRef<number>(0)
   const vadStartedAtRef = useRef<number>(0)
 
-  // Shared between the recorder/VAD and the VoiceOrb canvas — opening a
-  // separate getUserMedia inside the canvas would cause two "Microphone in
-  // use" indicators and could pick a different input device.
+  // Shared between the recorder/VAD and the island's waveform — opening a
+  // separate getUserMedia inside the visualisation would cause two
+  // "Microphone in use" indicators and could pick a different input device.
   const [vizAnalyser, setVizAnalyser] = useState<AnalyserNode | null>(null)
 
   // Barge-in refs
@@ -258,14 +451,22 @@ export default function App() {
   const bargeRafRef = useRef<number>(0)
   const bargeFirstVoiceAtRef = useRef<number | null>(null)
 
-  // Orb response streaming refs
-  const inFlightOrbIdRef = useRef<string | null>(null)
-  // Bumped every time we wipe the TTS queue (task_complete from a finished
-  // turn, errors, barge-in). Tool-narration requests captured a snapshot of
-  // this counter when they fired; if the value moved before the LLM
-  // responded, the narration belongs to a turn the user no longer cares
-  // about and gets dropped instead of speaking into a fresh recording.
-  const narrationGenRef = useRef(0)
+  // Orb response streaming refs.
+  // Turn-generation gate: cancelGenRef bumps every time we wipe the TTS
+  // queue (cancel-click, barge-in, errors, dismiss); activeTurnGenRef
+  // snapshots it when a turn starts. A mismatch means the chunks now
+  // arriving belong to a turn the user already killed — the CLI's graceful
+  // interrupt can keep streaming for several seconds after cancelTurn, and
+  // without this gate those stragglers re-queue TTS and the orb audibly
+  // resurrects after the user clicked it quiet.
+  const cancelGenRef = useRef(0)
+  const activeTurnGenRef = useRef(0)
+  // Snapshot of cancelGen taken right before submitTurn. orb_user_turn for a
+  // submitted (non-autonomous) turn adopts the gate ONLY if cancelGen still
+  // matches — a cancel landing in the submit window (after submitTurn, before
+  // the session goes busy) no-ops in main, and unconditional adoption would
+  // reopen the gate for the very turn the user just killed.
+  const pendingSubmitGenRef = useRef(0)
   const ttsBufferRef = useRef<string>('')
   // Number of sentences currently held by main (synthesizing, prefetching, or
   // playing). Capped at TTS_INFLIGHT_MAX so we always have at most one playing
@@ -277,6 +478,10 @@ export default function App() {
   const ttsInFlightCountRef = useRef(0)
   const ttsQueueRef = useRef<string[]>([])
   const turnEndedRef = useRef(true)
+  // Armed by task_complete; consumed by pumpTts when the last sentence
+  // drains so the turn-done chime plays at the moment speech actually ends.
+  // Cancels/errors disarm it so interruptions stay silent.
+  const doneChimeArmedRef = useRef(false)
   // Track whether we've already emitted ANY chunk for this turn — the first
   // phrase uses a lower minimum so audible output starts as soon as possible.
   const firstChunkPendingRef = useRef(true)
@@ -291,10 +496,22 @@ export default function App() {
   // letting main overlap synthesis with playback. Result: the inter-sentence
   // gap drops from ~250–500ms (per-request ElevenLabs TTFB) to near-zero.
   const pumpTts = useCallback(() => {
+    // Never speak over an active recording: if the user is mid-utterance
+    // (listening) or we're transcribing it, any queued sentence is a stale
+    // straggler that slipped past a cancel — speaking it would talk over
+    // the user's own turn. Idle stays allowed: autonomous recap turns
+    // legitimately start speech from idle.
+    if (stateRef.current === 'listening' || stateRef.current === 'transcribing') return
     while (ttsInFlightCountRef.current < TTS_INFLIGHT_MAX) {
       const next = ttsQueueRef.current.shift()
       if (!next) {
         if (turnEndedRef.current && ttsInFlightCountRef.current === 0) {
+          // Natural end of a spoken turn (not a cancel — those zero the
+          // armed flag first): play the soft "finished" chime exactly once.
+          if (doneChimeArmedRef.current && stateRef.current === 'talking') {
+            doneChimeArmedRef.current = false
+            playTurnDone()
+          }
           setState((prev) => (prev === 'talking' || prev === 'thinking' ? 'idle' : prev))
         }
         return
@@ -323,7 +540,10 @@ export default function App() {
       ttsBufferRef.current = incomplete
       if (complete.length) {
         firstChunkPendingRef.current = false
-        for (const s of complete) ttsQueueRef.current.push(s)
+        for (const s of complete) {
+          const clean = sanitizeForSpeech(s).trim()
+          if (clean) ttsQueueRef.current.push(clean)
+        }
       }
       pumpTts()
     },
@@ -331,7 +551,7 @@ export default function App() {
   )
 
   const flushPendingTts = useCallback(() => {
-    const tail = ttsBufferRef.current.trim()
+    const tail = sanitizeForSpeech(ttsBufferRef.current).trim()
     ttsBufferRef.current = ''
     if (tail) {
       ttsQueueRef.current.push(tail)
@@ -345,7 +565,11 @@ export default function App() {
     ttsBufferRef.current = ''
     ttsInFlightCountRef.current = 0
     firstChunkPendingRef.current = true
-    narrationGenRef.current++
+    doneChimeArmedRef.current = false
+    // The cancelled turn is over as far as the renderer is concerned —
+    // without this a gated-out task_complete would leave turnEnded false.
+    turnEndedRef.current = true
+    cancelGenRef.current++
     void window.orb.ttsCancel()
   }, [])
 
@@ -362,31 +586,26 @@ export default function App() {
     })
   }, [pumpTts])
 
-  // ─── Add a transcript entry, ring-buffered ───
-  const pushTranscript = useCallback((role: TranscriptEntry['role'], text: string) => {
-    if (!text.trim()) return
-    setTranscript((prev) => {
-      const next = [...prev, { id: uid(), role, text }]
-      return next.length > MAX_TRANSCRIPT ? next.slice(-MAX_TRANSCRIPT) : next
-    })
-  }, [])
-
   // ─── Backend events ───
   useEffect(() => {
     const off = window.orb.onEvent((rawEvent) => {
       const evt = rawEvent as { type: string; [k: string]: unknown }
       switch (evt.type) {
         case 'orb_user_turn': {
-          const text = String(evt.text || '')
-          if (text) pushTranscript('user', text)
+          // Adopt the current cancel generation — chunks from any turn the
+          // user killed before this one stay gated out below. For submitted
+          // turns, a cancelGen that moved past the pre-submit snapshot means
+          // the user cancelled inside the submit window, where main's
+          // cancelTurn no-ops against a not-yet-busy session: keep the gate
+          // closed and re-issue the cancel now that the turn really exists.
+          const autonomous = Boolean((evt as { autonomous?: boolean }).autonomous)
+          if (!autonomous && cancelGenRef.current !== pendingSubmitGenRef.current) {
+            void window.orb.cancelTurn()
+            break
+          }
+          activeTurnGenRef.current = cancelGenRef.current
           turnEndedRef.current = false
           firstChunkPendingRef.current = true
-          inFlightOrbIdRef.current = uid()
-          // Pre-create an empty orb entry so streaming has somewhere to land.
-          setTranscript((prev) => {
-            const next = [...prev, { id: inFlightOrbIdRef.current!, role: 'orb' as const, text: '' }]
-            return next.length > MAX_TRANSCRIPT ? next.slice(-MAX_TRANSCRIPT) : next
-          })
           break
         }
         case 'orb_user_attachment': {
@@ -398,19 +617,16 @@ export default function App() {
           break
         }
         case 'text_chunk': {
+          // Stale turn (cancelled via click / barge-in / dismiss) — the CLI's
+          // graceful interrupt keeps streaming for a few seconds; drop it.
+          if (cancelGenRef.current !== activeTurnGenRef.current) break
           const text = String((evt as { text?: string }).text || '')
           if (!text) break
-          // Append to in-flight orb transcript
-          if (inFlightOrbIdRef.current) {
-            const id = inFlightOrbIdRef.current
-            setTranscript((prev) =>
-              prev.map((m) => (m.id === id ? { ...m, text: m.text + text } : m)),
-            )
-          }
           appendTtsText(text)
           break
         }
         case 'tool_call': {
+          if (cancelGenRef.current !== activeTurnGenRef.current) break
           const toolName = String((evt as { toolName?: string }).toolName || '')
           if (!toolName || /^(Read|Glob|Grep|LS|TodoRead|TodoWrite)$/.test(toolName)) break
           // Non-silent tool call: speak whatever short tail is still in the
@@ -424,19 +640,22 @@ export default function App() {
           const friendly = toolName.startsWith('mcp__rax-orb__')
             ? toolName.replace('mcp__rax-orb__', '').replace(/^rax_/, '').replace(/_/g, ' ')
             : toolName.toLowerCase()
-          pushTranscript('tool', `running ${friendly}`)
           setCurrentTool(friendly)
           break
         }
         case 'task_complete': {
+          if (cancelGenRef.current !== activeTurnGenRef.current) break
           turnEndedRef.current = true
-          inFlightOrbIdRef.current = null
+          // Arm the turn-done chime — pumpTts plays it when the last queued
+          // sentence drains, i.e. when speech audibly ends rather than now.
+          doneChimeArmedRef.current = true
           flushPendingTts()
           // Only transition to idle once main is fully drained — both the
           // local queue AND main's pipeline (current + prefetched) need to
           // be empty, otherwise the orb would flash idle while there's still
           // unspoken audio in flight.
           if (ttsInFlightCountRef.current === 0 && ttsQueueRef.current.length === 0) {
+            doneChimeArmedRef.current = false
             setState((prev) => (prev === 'thinking' || prev === 'talking' ? 'idle' : prev))
           }
           break
@@ -444,8 +663,15 @@ export default function App() {
         case 'error': {
           const message = String((evt as { message?: string }).message || 'Unknown error')
           setErrorText(message)
-          inFlightOrbIdRef.current = null
           turnEndedRef.current = true
+          // A session error can land mid-recording (e.g. the backend dies
+          // while the user is talking) — tear the mic down too, or the
+          // recorder keeps running under the red bar and the retry click
+          // bounces off the re-entrancy guard.
+          if (recorderRef.current && recorderRef.current.state === 'recording') {
+            recordGenRef.current++
+            stopRecording(true)
+          }
           // Silence any in-flight / queued TTS so the orb stops mid-thought
           // instead of finishing a sentence after a session error.
           cancelAllSpeech()
@@ -456,7 +682,10 @@ export default function App() {
         case 'orb_session_dead': {
           setErrorText('Voice agent session ended. Click the orb to retry.')
           turnEndedRef.current = true
-          inFlightOrbIdRef.current = null
+          if (recorderRef.current && recorderRef.current.state === 'recording') {
+            recordGenRef.current++
+            stopRecording(true)
+          }
           cancelAllSpeech()
           playError()
           setState('error')
@@ -486,13 +715,15 @@ export default function App() {
       } else if (s === 'thinking' || s === 'talking') {
         // Barge-in into hold mode: cancel current TTS / turn, then begin
         // a new hold-mode recording. Mirrors triggerBargeIn but with the
-        // holdModeRef flag set first so VAD won't auto-stop us.
+        // holdModeRef flag set first so VAD won't auto-stop us. Quiet start —
+        // the barge tick is the acknowledgement; stacking the listen-start
+        // pair on top reads as two different cues for one gesture.
         playBargeIn()
         stopBargeIn()
         cancelAllSpeech()
         void window.orb.cancelTurn()
         holdModeRef.current = true
-        void startRecording()
+        void startRecording({ quiet: true })
       } else if (s === 'listening') {
         // Already recording (e.g. user clicked then pressed Option+R) —
         // promote to hold mode so VAD silence won't end it early.
@@ -514,10 +745,17 @@ export default function App() {
 
     const offDismiss = window.orb.onDismissed(() => {
       // Window hidden by host — clean up everything mid-flight so we don't
-      // keep recording / speaking / billing tokens.
+      // keep recording / speaking / billing tokens. The generation bump
+      // invalidates any finalizeRecording that already passed the recorder
+      // stage (state === 'transcribing'): without it, the transcription
+      // resolving seconds from now would submit the turn anyway and the
+      // hidden orb would think and speak invisibly.
+      recordGenRef.current++
       stopRecording(true)
       cancelAllSpeech()
       stopBargeIn()
+      // A hidden bar must not re-summon with the settings panel hanging open.
+      setSettingsOpen(false)
       // If a claude turn was still streaming, stop it.
       void window.orb.cancelTurn()
     })
@@ -534,13 +772,7 @@ export default function App() {
       offDismiss()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appendTtsText, flushPendingTts, cancelAllSpeech, pushTranscript])
-
-  // ─── Animate the state label on every transition (and on each tool change
-  //     during thinking, so the caption re-animates per tool). ───
-  useEffect(() => {
-    setLabelKey((k) => k + 1)
-  }, [state, currentTool])
+  }, [appendTtsText, flushPendingTts, cancelAllSpeech])
 
   // Clear the tool caption whenever we leave the thinking state — by then
   // we're either talking (TTS playing) or done.
@@ -559,23 +791,47 @@ export default function App() {
     const busy = state !== 'idle' && state !== 'error'
     window.orb.setBusy(busy)
     window.orb.setVoiceState(state)
-  }, [state])
+    // pumpTts refuses to run during listening/transcribing; anything queued
+    // in that window (an autonomous recap streaming while the user talks)
+    // would otherwise strand in ttsQueueRef until a stale replay. Resume the
+    // pump as soon as the gate lifts.
+    if (state !== 'listening' && state !== 'transcribing' && ttsQueueRef.current.length > 0) {
+      pumpTts()
+    }
+  }, [state, pumpTts])
 
   // ─── Click-through plumbing ───
-  // Empty pixels around the orb pass clicks through to the desktop. When the
-  // cursor enters the orb's circular hit zone we capture; when it leaves we
-  // go click-through again.
+  // The window is a wide transparent strip; only the notch itself should grab
+  // the pointer. We measure the live bounding box of `.notch-shell` on every
+  // mousemove (forwarded to us even while click-through) and capture when the
+  // cursor is inside it — including the few px of growth as the island opens,
+  // so the hover→expand→hover handoff never drops. A small pad keeps capture
+  // from chattering right at the rounded edge.
   const isCapturingRef = useRef(false)
   useEffect(() => {
+    const HIT_PAD = 6
     const updateCapture = (clientX: number, clientY: number) => {
-      const cx = window.innerWidth / 2
-      const cy = window.innerHeight / 2
-      const dist = Math.hypot(clientX - cx, clientY - cy)
-      const overOrb = dist <= ORB_HIT_RADIUS
-      if (overOrb && !isCapturingRef.current) {
+      // The error toast is interactive too (its dismiss ×) — without it in
+      // the hit test the window stays click-through over the toast and the
+      // button can never be pressed.
+      const targets = document.querySelectorAll('.notch-shell, .orb-error')
+      let inside = false
+      for (const el of targets) {
+        const rect = el.getBoundingClientRect()
+        if (
+          clientX >= rect.left - HIT_PAD &&
+          clientX <= rect.right + HIT_PAD &&
+          clientY >= rect.top - HIT_PAD &&
+          clientY <= rect.bottom + HIT_PAD
+        ) {
+          inside = true
+          break
+        }
+      }
+      if (inside && !isCapturingRef.current) {
         isCapturingRef.current = true
         window.orb.setIgnoreMouseEvents(false)
-      } else if (!overOrb && isCapturingRef.current) {
+      } else if (!inside && isCapturingRef.current) {
         isCapturingRef.current = false
         window.orb.setIgnoreMouseEvents(true, { forward: true })
       }
@@ -614,8 +870,12 @@ export default function App() {
       // cut them off and want to flag that. Otherwise the gentle listen-end.
       if (recordCappedRef.current) playListenCap()
       else playListenEnd()
+    } else if (recordNoSpeechRef.current) {
+      // Cancelled because nothing was said — "didn't catch that", not silence.
+      playMishear()
     }
     recordCappedRef.current = false
+    recordNoSpeechRef.current = false
     holdModeRef.current = false
 
     recordCancelledRef.current = cancel
@@ -625,22 +885,94 @@ export default function App() {
     } else {
       recorderStreamRef.current?.getTracks().forEach((t) => t.stop())
       recorderStreamRef.current = null
-      if (cancel) setState('idle')
+      // Cancels triggered while the error state owns the bar must not wash
+      // it back to idle.
+      if (cancel) setState((prev) => (prev === 'error' ? prev : 'idle'))
     }
   }, [])
 
-  const finalizeRecording = useCallback(async () => {
-    setState('transcribing')
-    try {
-      const chunks = recorderChunksRef.current
-      if (!chunks.length) {
-        setState('idle')
-        return
+  // Start transcribing the audio captured SO FAR, while the recorder keeps
+  // rolling through the tail of the silence hold. requestData() flushes the
+  // recorder's buffer; the property handler (ondataavailable) pushes the
+  // flushed chunk into recorderChunksRef first, then our one-shot listener
+  // snapshots the array. The snapshot is a valid standalone webm — chunk 0
+  // carries the container header and MediaRecorder streams are decodable at
+  // any chunk boundary.
+  const startSpeculativeTranscription = useCallback(() => {
+    const recorder = recorderRef.current
+    if (!recorder || recorder.state !== 'recording') return
+    const gen = recordGenRef.current
+    const onData = () => {
+      recorder.removeEventListener('dataavailable', onData)
+      if (gen !== recordGenRef.current || recorder !== recorderRef.current) return
+      const snapshot = recorderChunksRef.current.slice()
+      if (!snapshot.length) return
+      const blob = new Blob(snapshot, { type: recorderMimeRef.current })
+      const mySpec = {
+        // Resolve null on ANY failure (partial-webm decode hiccup, whisper
+        // error) — finalizeRecording then just runs the full path it would
+        // have run anyway. Speculation can make things faster, never break.
+        promise: blobToWavBase64(blob)
+          .then((wav) => window.orb.transcribeAudio(wav))
+          .catch(() => null),
       }
-      const blob = new Blob(chunks, { type: recorderMimeRef.current })
-      const wavBase64 = await blobToWavBase64(blob)
-      const result = await window.orb.transcribeAudio(wavBase64)
+      specRef.current = mySpec
+      // Semantic endpointing: if the transcript lands while we're STILL in
+      // the silence hold, the user hasn't resumed, and the sentence reads
+      // complete (terminal punctuation), end the turn right now instead of
+      // waiting out the rest of the hold. Identity check against specRef
+      // guarantees no voice arrived after the snapshot; everything else is
+      // the exact stop the hold would have triggered moments later.
+      void mySpec.promise.then((result) => {
+        if (!result || result.error) return
+        if (specRef.current !== mySpec) return
+        if (gen !== recordGenRef.current) return
+        if (holdModeRef.current) return
+        if (recorderRef.current !== recorder || recorder.state !== 'recording') return
+        const t = (result.transcript || '').trim()
+        if (/[.!?…]["')\]]*$/.test(t)) stopRecording(false)
+      })
+    }
+    recorder.addEventListener('dataavailable', onData)
+    try {
+      recorder.requestData()
+    } catch {
+      recorder.removeEventListener('dataavailable', onData)
+    }
+  }, [stopRecording])
+
+  const finalizeRecording = useCallback(async () => {
+    // Anything that invalidates this turn while we await (dismiss, reset,
+    // cancel-click, a fresh recording) bumps the generation; bail without
+    // touching state — the bumper already decided what the UI shows.
+    const gen = recordGenRef.current
+    setState('transcribing')
+    // Adopt the speculative transcription if one survived to this point —
+    // no voice landed after its snapshot, so the only audio it's missing is
+    // the silence hold. Usually it's already resolved, collapsing the
+    // transcribing phase to ~0ms.
+    const spec = specRef.current
+    specRef.current = null
+    try {
+      let result: { error: string | null; transcript: string | null } | null = null
+      if (spec) {
+        result = await spec.promise
+        if (gen !== recordGenRef.current) return
+      }
+      if (!result) {
+        const chunks = recorderChunksRef.current
+        if (!chunks.length) {
+          setState('idle')
+          return
+        }
+        const blob = new Blob(chunks, { type: recorderMimeRef.current })
+        const wavBase64 = await blobToWavBase64(blob)
+        if (gen !== recordGenRef.current) return
+        result = await window.orb.transcribeAudio(wavBase64)
+        if (gen !== recordGenRef.current) return
+      }
       if (result.error) {
+        playError()
         setErrorText(result.error)
         setState('error')
         return
@@ -655,100 +987,203 @@ export default function App() {
         return
       }
       setState('thinking')
+      // Gate snapshot for the submit window — see pendingSubmitGenRef.
+      pendingSubmitGenRef.current = cancelGenRef.current
       const submit = await window.orb.submitTurn(text)
+      if (gen !== recordGenRef.current) return
       if (!submit.ok) {
+        playError()
         setErrorText(submit.error || 'Failed to submit turn')
         setState('error')
       }
     } catch (err) {
+      if (gen !== recordGenRef.current) return
       const e = err as Error
+      if (/no voice detected/i.test(e.message || '')) {
+        // Same user behavior as an empty transcript — the room was quiet.
+        // The gentle mishear, not the red error state.
+        playMishear()
+        setState('idle')
+        return
+      }
+      playError()
       setErrorText(e.message || 'Voice failed')
       setState('error')
     }
   }, [])
 
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (opts?: { quiet?: boolean; handoff?: BargeHandoff }) => {
+    // Re-entrancy guard: a second call while getUserMedia is still in
+    // flight (double-click, hotkey+click race) would orphan the first
+    // stream — mic indicator stuck on with nothing attached to it.
+    if (recordStartingRef.current) return
+    if (recorderRef.current && recorderRef.current.state === 'recording') return
+    recordStartingRef.current = true
+    // Invalidate any finalizeRecording still awaiting from a prior session,
+    // and keep our own generation so a dismiss/reset arriving while we await
+    // getUserMedia below invalidates THIS start too.
+    recordGenRef.current++
+    const myGen = recordGenRef.current
     setErrorText(null)
     cancelAllSpeech()
     stopBargeIn()
-    recorderChunksRef.current = []
+    const handoff = opts?.handoff ?? null
+    // On barge-in handoff the pre-roll chunks already hold the speech onset.
+    recorderChunksRef.current = handoff ? handoff.chunks : []
     recordCancelledRef.current = false
+    recordNoSpeechRef.current = false
+    // A speculation from a previous session must never leak into this one.
+    specRef.current = null
 
     let stream: MediaStream
+    if (handoff) {
+      stream = handoff.stream
+      // The barge mic runs AGC-off so speaker bleed can't pump toward its
+      // threshold; recordings want the tuned AGC-on capture Whisper is used
+      // to. Best-effort — not every device accepts live re-constraining.
+      for (const t of stream.getAudioTracks()) {
+        t.applyConstraints({ autoGainControl: true }).catch(() => {})
+      }
+    } else {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        })
+      } catch (err) {
+        recordStartingRef.current = false
+        const e = err as Error
+        const denied = e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError'
+        playError()
+        setErrorText(denied ? 'Microphone permission denied.' : `Mic error: ${e.message}`)
+        setState('error')
+        return
+      }
+    }
+    // Dismiss / reset / a competing start fired while getUserMedia was in
+    // flight — this session is already dead. Release the mic before the OS
+    // indicator ever reads as "live with no UI".
+    if (myGen !== recordGenRef.current) {
+      stream.getTracks().forEach((t) => t.stop())
+      recordStartingRef.current = false
+      return
+    }
+
+    // Definite-assignment assertion: the catch below returns, so any code
+    // past the try block has analyser assigned.
+    let analyser!: AnalyserNode
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      })
-    } catch (err) {
-      const e = err as Error
-      const denied = e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError'
-      setErrorText(denied ? 'Microphone permission denied.' : `Mic error: ${e.message}`)
+      recorderStreamRef.current = stream
+
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm'
+      recorderMimeRef.current = mime
+
+      // Adopt the barge pre-roll recorder when it's already rolling — a fresh
+      // recorder on the same stream would lose everything captured during the
+      // barge confirmation window (the first words of the interruption).
+      const recorder =
+        handoff?.recorder && handoff.recorder.state === 'recording'
+          ? handoff.recorder
+          : new MediaRecorder(stream, { mimeType: mime })
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recorderChunksRef.current.push(e.data)
+      }
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop())
+        recorderStreamRef.current = null
+        if (recordCancelledRef.current) {
+          // A cancel triggered by an error event must not wash the red
+          // state back to idle.
+          setState((prev) => (prev === 'error' ? prev : 'idle'))
+          return
+        }
+        void finalizeRecording()
+      }
+      recorder.onerror = () => {
+        stream.getTracks().forEach((t) => t.stop())
+        recorderStreamRef.current = null
+        playError()
+        setErrorText('Recording failed.')
+        setState('error')
+      }
+      recorderRef.current = recorder
+      if (recorder.state !== 'recording') recorder.start()
+
+      // VAD setup. On handoff, reuse the barge pipeline's analyser — its
+      // context is already warm on this very stream.
+      let ctx: AudioContext
+      if (handoff?.ctx && handoff.analyser && handoff.ctx.state !== 'closed') {
+        ctx = handoff.ctx
+        analyser = handoff.analyser
+      } else {
+        const Ctor =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+        ctx = new Ctor()
+        analyser = ctx.createAnalyser()
+        analyser.fftSize = 1024
+        analyser.smoothingTimeConstant = 0.6
+        ctx.createMediaStreamSource(stream).connect(analyser)
+      }
+      vadCtxRef.current = ctx
+      vadAnalyserRef.current = analyser
+    } catch {
+      // Recorder/AudioContext construction failed — realistic when the
+      // device vanished between acquire and start (e.g. USB mic unplugged
+      // mid barge-handoff). Without this, recordStartingRef would stick
+      // true forever and the dead stream would hold the mic indicator on.
+      stream.getTracks().forEach((t) => t.stop())
+      recorderStreamRef.current = null
+      recorderRef.current = null
+      recordStartingRef.current = false
+      playError()
+      setErrorText('Recording failed.')
       setState('error')
       return
     }
-    recorderStreamRef.current = stream
-
-    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : 'audio/webm'
-    recorderMimeRef.current = mime
-
-    const recorder = new MediaRecorder(stream, { mimeType: mime })
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recorderChunksRef.current.push(e.data)
-    }
-    recorder.onstop = () => {
-      stream.getTracks().forEach((t) => t.stop())
-      recorderStreamRef.current = null
-      if (recordCancelledRef.current) {
-        setState('idle')
-        return
-      }
-      void finalizeRecording()
-    }
-    recorder.onerror = () => {
-      stream.getTracks().forEach((t) => t.stop())
-      recorderStreamRef.current = null
-      setErrorText('Recording failed.')
-      setState('error')
-    }
-    recorderRef.current = recorder
-    recorder.start()
     setState('listening')
-    playListenStart()
-
-    // VAD setup
-    const Ctor =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-    const ctx = new Ctor()
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 1024
-    analyser.smoothingTimeConstant = 0.6
-    ctx.createMediaStreamSource(stream).connect(analyser)
-    vadCtxRef.current = ctx
-    vadAnalyserRef.current = analyser
-    // Share the same analyser with the VoiceOrb canvas — opening a second
+    // Quiet starts: barge-in already acknowledged with its own tick —
+    // stacking the listen-start pair on top reads as two cues for one act.
+    if (!opts?.quiet) playListenStart()
+    // Share the same analyser with the island's waveform — opening a second
     // getUserMedia just for the visualisation would double the OS mic
     // indicator and could bind to a different input device.
     setVizAnalyser(analyser)
     vadStartedAtRef.current = performance.now()
-    vadStartedSpeakingAtRef.current = null
-    vadLastVoiceAtRef.current = 0
+    // On handoff the user is ALREADY mid-word: credit the real onset so
+    // MIN_SPEECH_MS counts from actual speech, not from pipeline swap time.
+    vadStartedSpeakingAtRef.current = handoff ? (handoff.voiceAt ?? performance.now()) : null
+    vadLastVoiceAtRef.current = handoff ? performance.now() : 0
     recordCappedRef.current = false
+    recordStartingRef.current = false
 
     // Adaptive VAD: sample ~200ms of ambient and lift the speech/silence
     // thresholds by the measured floor, so the detector still fires in
     // cafés / open offices instead of treating background chatter as
     // speech. The constants stay as floors — quiet rooms keep the original
-    // (more sensitive) defaults.
+    // (more sensitive) defaults. The floor is a low percentile, not the
+    // mean, so a user who starts talking instantly doesn't poison it; two
+    // consecutive loud frames abort calibration and count as speech onset.
+    // Skipped entirely on handoff — the user is already speaking.
     const CALIBRATION_MS = 200
-    let calibrating = true
+    let calibrating = !handoff
     const calibrationStartedAt = performance.now()
-    let calibrationSumRms = 0
-    let calibrationN = 0
+    const calibrationFrames: number[] = []
+    let calibrationLoudRun = 0
     let speechThreshold = VAD_SPEECH_RMS
     let silenceThreshold = VAD_SILENCE_RMS
+    const finalizeCalibration = (now: number) => {
+      if (calibrationFrames.length >= 3) {
+        const sorted = [...calibrationFrames].sort((a, b) => a - b)
+        const floor = sorted[Math.floor(sorted.length * 0.2)]
+        speechThreshold = Math.max(VAD_SPEECH_RMS, floor + 0.02)
+        silenceThreshold = Math.max(VAD_SILENCE_RMS, floor + 0.005)
+      }
+      calibrating = false
+      // Reset so the calibration window doesn't eat into MAX_RECORD_MS.
+      vadStartedAtRef.current = now
+    }
 
     const data = new Uint8Array(analyser.fftSize)
     const tick = () => {
@@ -763,18 +1198,22 @@ export default function App() {
       const rms = Math.sqrt(sumSq / data.length)
       const now = performance.now()
       if (calibrating) {
-        calibrationSumRms += rms
-        calibrationN += 1
-        if (now - calibrationStartedAt >= CALIBRATION_MS) {
-          const noiseFloor = calibrationN > 0 ? calibrationSumRms / calibrationN : 0
-          speechThreshold = Math.max(VAD_SPEECH_RMS, noiseFloor + 0.02)
-          silenceThreshold = Math.max(VAD_SILENCE_RMS, noiseFloor + 0.005)
-          calibrating = false
-          // Reset so the calibration window doesn't eat into MAX_RECORD_MS.
-          vadStartedAtRef.current = now
+        if (rms > VAD_SPEECH_RMS) {
+          calibrationLoudRun += 1
+        } else {
+          calibrationLoudRun = 0
+          calibrationFrames.push(rms)
         }
-        vadRafRef.current = requestAnimationFrame(tick)
-        return
+        if (calibrationLoudRun >= 2) {
+          // The user started talking inside the calibration window —
+          // finalize from the quiet frames only and fall through so this
+          // very frame registers as speech onset.
+          finalizeCalibration(now)
+        } else {
+          if (now - calibrationStartedAt >= CALIBRATION_MS) finalizeCalibration(now)
+          vadRafRef.current = requestAnimationFrame(tick)
+          return
+        }
       }
       const sinceStart = now - vadStartedAtRef.current
       if (rms > speechThreshold) {
@@ -782,11 +1221,41 @@ export default function App() {
           vadStartedSpeakingAtRef.current = now
         }
         vadLastVoiceAtRef.current = now
+        // New voice — any in-flight speculative transcription is now a
+        // prefix of a longer utterance. Drop it; a fresh one starts at the
+        // next candidate silence.
+        specRef.current = null
+      }
+      // Nothing said: close quietly with the mishear cue instead of trapping
+      // the user until the 30s cap (which would then read as "talked too
+      // long" — wrong for an accidental activation).
+      if (
+        vadStartedSpeakingAtRef.current === null &&
+        sinceStart > NO_SPEECH_TIMEOUT_MS &&
+        !holdModeRef.current
+      ) {
+        recordNoSpeechRef.current = true
+        stopRecording(true)
+        return
       }
       const heardEnough =
         vadStartedSpeakingAtRef.current !== null &&
         now - vadStartedSpeakingAtRef.current > MIN_SPEECH_MS
       const silenceMs = vadLastVoiceAtRef.current ? now - vadLastVoiceAtRef.current : 0
+      // Speculative transcription: a few hundred ms into a candidate
+      // silence, start Whisper on the audio-so-far so it runs DURING the
+      // rest of the hold instead of after it. Skipped in hold mode — the
+      // user controls duration there and mid-utterance pauses are routine,
+      // so speculation would mostly be wasted runs.
+      if (
+        heardEnough &&
+        !specRef.current &&
+        !holdModeRef.current &&
+        silenceMs > SPECULATIVE_TRANSCRIBE_MS &&
+        rms < silenceThreshold
+      ) {
+        startSpeculativeTranscription()
+      }
       const silenceLongEnough = heardEnough && silenceMs > VAD_SILENCE_HOLD_MS && rms < silenceThreshold
       const tooLong = sinceStart > MAX_RECORD_MS
       // Hold-to-speak: the key release is authoritative; ignore VAD
@@ -800,7 +1269,7 @@ export default function App() {
       vadRafRef.current = requestAnimationFrame(tick)
     }
     vadRafRef.current = requestAnimationFrame(tick)
-  }, [cancelAllSpeech, finalizeRecording, stopRecording])
+  }, [cancelAllSpeech, finalizeRecording, stopRecording, startSpeculativeTranscription])
 
   // ─── Voice barge-in ───
   // While the orb is thinking or talking, run a mic VAD with a higher
@@ -825,23 +1294,43 @@ export default function App() {
     bargeFirstVoiceAtRef.current = null
   }, [])
 
-  const triggerBargeIn = useCallback(() => {
+  const triggerBargeIn = useCallback((handoff?: BargeHandoff) => {
     playBargeIn()
     stopBargeIn()
     cancelAllSpeech()
     void window.orb.cancelTurn()
-    void startRecording()
+    // Quiet: the barge tick above is the acknowledgement.
+    void startRecording({ quiet: true, handoff })
   }, [stopBargeIn, cancelAllSpeech, startRecording])
 
   // Stable boolean so the thinking → talking transition doesn't tear down
   // and rebuild the mic mid-turn (would briefly disable barge-in).
-  const bargeInActive = state === 'talking' || state === 'thinking'
+  // 'transcribing' is included as PREWARM only — getUserMedia + the audio
+  // graph spin up while Whisper runs, so the detector is already live the
+  // instant thinking begins (previously that spin-up left the first
+  // ~100-300ms of thinking uncovered). The trigger itself stays gated to
+  // thinking/talking below.
+  const bargeInActive = state === 'talking' || state === 'thinking' || state === 'transcribing'
   useEffect(() => {
     if (!bargeInActive) {
       stopBargeIn()
       return
     }
     let cancelled = false
+    // Pre-roll recorder: starts on the FIRST frame that crosses the barge
+    // threshold, so when the 220ms confirmation passes, everything the user
+    // said is already captured and handed to the recording session. webm
+    // chunks are only decodable from the header chunk, so false alarms
+    // discard the whole recorder rather than trimming a ring buffer.
+    let preRec: MediaRecorder | null = null
+    let preChunks: Blob[] = []
+    const discardPreRoll = () => {
+      if (preRec) {
+        try { if (preRec.state !== 'inactive') preRec.stop() } catch {}
+        preRec = null
+      }
+      preChunks = []
+    }
     ;(async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -876,16 +1365,65 @@ export default function App() {
           }
           const rms = Math.sqrt(sumSq / data.length)
           const now = performance.now()
+          // Prewarm-only while transcribing: keep the graph hot but never
+          // arm on trailing speech from the utterance we just captured.
+          const canTrigger = stateRef.current === 'thinking' || stateRef.current === 'talking'
+          if (!canTrigger) {
+            bargeFirstVoiceAtRef.current = null
+            discardPreRoll()
+            bargeRafRef.current = requestAnimationFrame(tick)
+            return
+          }
           if (rms > BARGE_IN_RMS) {
             if (bargeFirstVoiceAtRef.current === null) {
               bargeFirstVoiceAtRef.current = now
+              // Voice onset — start capturing immediately so the words said
+              // during the confirmation window aren't lost. Each recorder
+              // gets its OWN chunk array: a discarded false-alarm recorder
+              // delivers its final dataavailable asynchronously, and letting
+              // it append to a shared array would splice a stale webm header
+              // into the next pre-roll.
+              try {
+                const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                  ? 'audio/webm;codecs=opus'
+                  : 'audio/webm'
+                preRec = new MediaRecorder(stream, { mimeType: mime })
+                const myChunks: Blob[] = []
+                preChunks = myChunks
+                preRec.ondataavailable = (e) => {
+                  if (e.data.size > 0) myChunks.push(e.data)
+                }
+                preRec.start(100)
+              } catch {
+                preRec = null
+              }
             }
             if (now - bargeFirstVoiceAtRef.current >= BARGE_IN_MIN_MS) {
-              triggerBargeIn()
+              // Confirmed. Transfer ownership of the whole pipeline to the
+              // recording session BEFORE any stopBargeIn can run (it's
+              // called inside triggerBargeIn → startRecording and again by
+              // this effect's cleanup when state flips to 'listening') —
+              // otherwise the handed-off tracks get stopped mid-recording.
+              const handoff: BargeHandoff = {
+                stream,
+                recorder: preRec,
+                chunks: preChunks,
+                ctx: bargeCtxRef.current,
+                analyser: bargeAnalyserRef.current,
+                voiceAt: bargeFirstVoiceAtRef.current,
+              }
+              preRec = null
+              preChunks = []
+              bargeStreamRef.current = null
+              bargeCtxRef.current = null
+              bargeAnalyserRef.current = null
+              triggerBargeIn(handoff)
               return
             }
           } else {
             bargeFirstVoiceAtRef.current = null
+            // False alarm (cough, door slam) — drop whatever we grabbed.
+            discardPreRoll()
           }
           bargeRafRef.current = requestAnimationFrame(tick)
         }
@@ -896,6 +1434,7 @@ export default function App() {
     })()
     return () => {
       cancelled = true
+      discardPreRoll()
       stopBargeIn()
     }
   }, [bargeInActive, stopBargeIn, triggerBargeIn])
@@ -907,97 +1446,46 @@ export default function App() {
       void startRecording()
     } else if (state === 'listening') {
       stopRecording(false)
-    } else if (state === 'talking') {
-      cancelAllSpeech()
+    } else if (state === 'transcribing') {
+      // Previously the one state where a tap was silently swallowed. Click
+      // means "stop what you're doing" in every other busy state — honor it
+      // here too: invalidate the in-flight transcription and park.
+      recordGenRef.current++
+      playBargeIn()
       setState('idle')
-    } else if (state === 'thinking') {
+    } else if (state === 'talking' || state === 'thinking') {
+      // One meaning across both busy states: stop this turn. cancelTurn is
+      // required even while talking — the turn is usually still streaming,
+      // and without it the next text_chunk re-queues TTS and the orb
+      // audibly resurrects right after the user clicked it quiet.
       void window.orb.cancelTurn()
       cancelAllSpeech()
       setState('idle')
     }
   }, [state, startRecording, stopRecording, cancelAllSpeech])
 
-  // Drag with click-vs-drag detection AND rAF throttle for the IPC.
-  const onOrbMouseDown = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (e.button !== 0) return
-      e.preventDefault()
-      const startCursorX = e.screenX
-      const startCursorY = e.screenY
-      const startWindowX = window.screenX
-      const startWindowY = window.screenY
-      let dragged = false
-      let pendingX: number | null = null
-      let pendingY: number | null = null
-      let rafId: number | null = null
-
-      const flush = () => {
-        rafId = null
-        if (pendingX !== null && pendingY !== null) {
-          window.orb.setBounds(pendingX, pendingY)
-          pendingX = null
-          pendingY = null
-        }
-      }
-
-      const onMove = (m: MouseEvent) => {
-        const dCursorX = m.screenX - startCursorX
-        const dCursorY = m.screenY - startCursorY
-        // 7px (was 4) — trackpad sensitivity makes 4px easy to cross during a
-        // tap, so the orb misclassified taps as drags. 7px is roughly one
-        // physical mm on a Retina display and avoids the false-positive.
-        if (!dragged && Math.hypot(dCursorX, dCursorY) > 7) dragged = true
-        if (dragged) {
-          pendingX = startWindowX + dCursorX
-          pendingY = startWindowY + dCursorY
-          if (rafId === null) rafId = requestAnimationFrame(flush)
-        }
-      }
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove)
-        document.removeEventListener('mouseup', onUp)
-        if (rafId !== null) {
-          cancelAnimationFrame(rafId)
-          flush()
-        }
-        if (!dragged) onOrbClick()
-      }
-      document.addEventListener('mousemove', onMove)
-      document.addEventListener('mouseup', onUp)
-    },
-    [onOrbClick],
-  )
-
-  // Long-press the orb (650ms) to reset the conversation.
-  const onOrbContextMenu = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      e.preventDefault()
-      void window.orb.resetSession()
-      setTranscript([])
-      cancelAllSpeech()
-      setState('idle')
-      setErrorText(null)
-    },
-    [cancelAllSpeech],
-  )
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === 'Space') {
+        // In settings mode Space belongs to the focused control (toggle,
+        // select), not push-to-talk.
+        if (settingsOpen) return
         e.preventDefault()
         onOrbClick()
       } else if (e.key === 'Escape') {
+        // First Esc closes the settings panel; the next one hides the orb.
+        if (settingsOpen) {
+          setSettingsOpen(false)
+          return
+        }
         cancelAllSpeech()
         if (state === 'listening') stopRecording(true)
         if (state === 'thinking') void window.orb.cancelTurn()
         void window.orb.hide()
-      } else if (e.key === 'Tab' && !e.metaKey && !e.altKey && !e.ctrlKey) {
-        e.preventDefault()
-        setShowTranscript((v) => !v)
       } else if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
         e.preventDefault()
+        recordGenRef.current++
         void window.orb.resetSession()
-        setTranscript([])
         cancelAllSpeech()
         setState('idle')
         setErrorText(null)
@@ -1026,7 +1514,7 @@ export default function App() {
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [state, onOrbClick, stopRecording, cancelAllSpeech])
+  }, [state, settingsOpen, onOrbClick, stopRecording, cancelAllSpeech])
 
   useEffect(
     () => () => {
@@ -1037,75 +1525,67 @@ export default function App() {
     [stopRecording, cancelAllSpeech, stopBargeIn],
   )
 
-  // While thinking with an active tool, replace the opaque "thinking" text
-  // with the live tool name. The persistent class skips the auto fade-out so
-  // the caption stays visible for the full duration of long tool calls.
-  const showingTool = state === 'thinking' && !!currentTool
-  const label = showingTool ? `running ${currentTool}` : STATE_LABEL[state]
-  const orbState = stateToOrb(state)
-  const transcriptVisible = showTranscript && transcript.length > 0
+  // ─── Live caption fed into the island's left wing ───
+  // Quiet metadata, not a headline: just the tool name with a trailing
+  // ellipsis while thinking ("Screenshot…"). Streamed response text lives in
+  // the bottom caption pill; error detail lives in the toast below the bar.
+  const caption =
+    state === 'thinking' && currentTool
+      ? `${currentTool.charAt(0).toUpperCase()}${currentTool.slice(1)}…`
+      : null
 
   return (
     <div className="orb-page">
       {errorText && (
-        <div className="orb-overlay orb-error" role="alert">
+        <div className={`orb-overlay orb-error${settingsOpen ? ' below-settings' : ''}`} role="alert">
           <span>{errorText}</span>
           <button type="button" onClick={() => setErrorText(null)} aria-label="Dismiss">×</button>
         </div>
       )}
 
-      <div
-        className="orb-tap"
-        role="button"
-        tabIndex={0}
-        aria-label="Voice orb — click to talk, hold Option+R for push-to-talk, drag to move, right-click to reset"
-        onMouseDown={onOrbMouseDown}
-        onContextMenu={onOrbContextMenu}
-      >
-        <VoiceOrb state={orbState} size={100} analyser={vizAnalyser} flashAt={flashAt} />
-      </div>
-
-      {label && (
-        <div
-          key={labelKey}
-          className={`orb-overlay state-label${showingTool ? ' persistent' : ''}`}
-        >
-          {label}
-        </div>
-      )}
-
-      {transcriptVisible && (
-        <div className="orb-transcript" aria-live="polite">
-          {transcript.map((t) => (
-            <TranscriptTurn key={t.id} entry={t} />
-          ))}
-        </div>
-      )}
+      <Notch
+        state={state}
+        caption={caption}
+        analyser={vizAnalyser}
+        ttsEnvelope={ttsEnvelopeRef}
+        flashAt={flashAt}
+        notched={notched}
+        mascotColor={mascotColor}
+        onActivate={onOrbClick}
+        settingsOpen={settingsOpen}
+        onSettingsToggle={toggleSettings}
+        dockVisible={dockVisible}
+        onDockToggle={handleDockToggle}
+        settingsPanel={
+          <NotchSettings
+            voiceId={voiceId}
+            onVoiceChange={handleVoiceChange}
+            onVoicePreview={(id) => window.orb.previewVoice(id)}
+            captionsEnabled={captionsEnabled}
+            onCaptionsChange={handleCaptionsChange}
+            colorId={mascotColor ?? DEFAULT_MASCOT_COLOR_ID}
+            onColorChange={handleColorChange}
+          />
+        }
+      />
     </div>
   )
 }
 
-function TranscriptTurn({ entry }: { entry: TranscriptEntry }) {
-  const roleLabel = useMemo(() => {
-    if (entry.role === 'user') return 'You'
-    if (entry.role === 'orb') return 'Orb'
-    return 'Tool'
-  }, [entry.role])
-  return (
-    <div className="turn">
-      <div className={`role ${entry.role}`}>{roleLabel}</div>
-      <div>{entry.text}</div>
-    </div>
-  )
-}
 
 // ─── WebM/Opus → 16 kHz mono WAV ───
 
 async function blobToWavBase64(blob: Blob): Promise<string> {
   const arrayBuffer = await blob.arrayBuffer()
   const audioCtx = new AudioContext()
-  const decoded = await audioCtx.decodeAudioData(arrayBuffer)
-  audioCtx.close()
+  let decoded: AudioBuffer
+  try {
+    decoded = await audioCtx.decodeAudioData(arrayBuffer)
+  } finally {
+    // Close on the failure path too — a decode error here used to leak a
+    // live AudioContext (and its audio render thread) per failed attempt.
+    audioCtx.close().catch(() => {})
+  }
   const mono = mixToMono(decoded)
   if (rmsLevel(mono) < 0.002) {
     throw new Error('No voice detected')

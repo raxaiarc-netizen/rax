@@ -26,7 +26,7 @@ const mono = Fragment_Mono({
 export const metadata: Metadata = {
   title: 'Rax — your AI engineering crew, on your desktop',
   description:
-    'Five named agents, an ambient voice orb, and live preview — a friendly desktop crew that ships code for you. Pay only for the tokens you use.',
+    'Five named agents, a living notch voice companion, and live preview — a friendly desktop crew that ships code for you. Pay only for the tokens you use.',
   icons: {
     icon: [{ url: '/rax-logo.png' }],
   },

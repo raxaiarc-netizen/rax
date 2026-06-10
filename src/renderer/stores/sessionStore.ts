@@ -1,6 +1,7 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, CodeModeState, MirrorAction, SessionSnapshot } from '../../shared/types'
-import { ORB_TAB_ID, DEFAULT_MODEL_ID } from '../../shared/types'
+import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, CodeModeState, MirrorAction, SessionSnapshot, ClaudeMode } from '../../shared/types'
+import { ORB_TAB_ID, DEFAULT_MODEL_ID, isEffortLevel } from '../../shared/types'
+import type { EffortLevel } from '../../shared/types'
 import { AGENTS, DEFAULT_AGENT_ID, getAgent, isAgentId } from '../../shared/agents'
 import { useThemeStore } from '../theme'
 import notificationSrc from '../../../resources/notification.mp3'
@@ -15,16 +16,49 @@ function publishMirror(action: MirrorAction): void {
 
 // ─── Known models ───
 
-export const AVAILABLE_MODELS = [
-  { id: DEFAULT_MODEL_ID, label: 'Opus 4.7' },
+// Re-export for UI pickers that already source AVAILABLE_MODELS from here.
+export { EFFORT_LEVELS } from '../../shared/types'
+export type { EffortLevel } from '../../shared/types'
+
+export interface ModelOption {
+  id: string
+  label: string
+  /** Only usable through the Rax cloud proxy, i.e. the bundled "Rax's
+   *  Claude" instance. The system ("Default") Claude talks straight to
+   *  Anthropic with the user's own creds, which reject non-Anthropic ids. */
+  raxOnly?: boolean
+}
+
+export const AVAILABLE_MODELS: readonly ModelOption[] = [
+  { id: DEFAULT_MODEL_ID, label: 'Opus 4.8' },
+  { id: 'claude-fable-5', label: 'Fable 5' },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
   { id: 'claude-opus-4-6', label: 'Opus 4.6' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
   // Rax Default — wire id is still `kimi-k2.6` (the Moonshot model the proxy
   // forwards to server-side). The UI label is genericized so users see this
   // as a first-class Rax model rather than as a third-party brand.
-  { id: 'kimi-k2.6', label: 'Rax Default' },
-] as const
+  { id: 'kimi-k2.6', label: 'Rax Default', raxOnly: true },
+]
+
+export function isRaxOnlyModel(modelId: string): boolean {
+  const normalized = normalizeModelId(modelId)
+  return AVAILABLE_MODELS.some((m) => m.raxOnly && m.id === normalized)
+}
+
+/** The models the user may actually pick right now — rax-only entries are
+ *  hidden while the system ("Default") Claude instance is active. */
+export function getSelectableModels(claudeMode: ClaudeMode): ModelOption[] {
+  return AVAILABLE_MODELS.filter((m) => !m.raxOnly || claudeMode === 'bundled')
+}
+
+/** Convenience hook for pickers: AVAILABLE_MODELS filtered by the live
+ *  Claude mode (see the wiring at the bottom of this file). */
+export function useSelectableModels(): ModelOption[] {
+  const claudeMode = useSessionStore((s) => s.claudeMode)
+  return getSelectableModels(claudeMode)
+}
 
 function normalizeModelId(modelId: string): string {
   // Claude sometimes appends context window hints like "[1m]" to model IDs.
@@ -33,22 +67,52 @@ function normalizeModelId(modelId: string): string {
 
 const PREFERRED_MODEL_STORAGE_KEY = 'rax:preferredModel'
 
-// One-time migration: users who launched the app before 4.7 became default
-// have 'claude-opus-4-6' persisted as their preferred model. Upgrade them to
-// the new default so the orb, status bar, and spawn args all line up. They can
-// still pick 4.6 again from the model menu if they want it.
-const LEGACY_DEFAULT_MODEL_ID = 'claude-opus-4-6'
+// One-time migration: users who launched the app before Opus 4.8 became
+// default have an older default ('claude-opus-4-6' / 'claude-opus-4-7')
+// persisted as their preferred model. Upgrade them to the new default so the
+// orb, status bar, and spawn args all line up. The migration runs once
+// (tracked via marker key) — picking an older model from the menu afterwards
+// sticks across relaunches.
+const LEGACY_DEFAULT_MODEL_IDS = ['claude-opus-4-6', 'claude-opus-4-7']
+const MODEL_MIGRATION_KEY = 'rax:modelMigratedTo:claude-opus-4-8'
 
 function loadPersistedPreferredModel(): string {
   try {
     const stored = localStorage.getItem(PREFERRED_MODEL_STORAGE_KEY)
-    if (stored === LEGACY_DEFAULT_MODEL_ID) {
+    if (
+      stored &&
+      LEGACY_DEFAULT_MODEL_IDS.includes(stored) &&
+      !localStorage.getItem(MODEL_MIGRATION_KEY)
+    ) {
       localStorage.setItem(PREFERRED_MODEL_STORAGE_KEY, DEFAULT_MODEL_ID)
+      localStorage.setItem(MODEL_MIGRATION_KEY, '1')
       return DEFAULT_MODEL_ID
     }
-    if (stored && AVAILABLE_MODELS.some((m) => m.id === stored)) return stored
+    if (stored && AVAILABLE_MODELS.some((m) => m.id === stored)) {
+      localStorage.setItem(MODEL_MIGRATION_KEY, '1')
+      return stored
+    }
   } catch {}
   return DEFAULT_MODEL_ID
+}
+
+// ─── Effort (Claude CLI --effort) ───
+
+const PREFERRED_EFFORT_STORAGE_KEY = 'rax:preferredEffort'
+
+function loadPersistedPreferredEffort(): EffortLevel | null {
+  try {
+    const stored = localStorage.getItem(PREFERRED_EFFORT_STORAGE_KEY)
+    if (isEffortLevel(stored)) return stored
+  } catch {}
+  return null
+}
+
+function persistPreferredEffort(effort: EffortLevel | null): void {
+  try {
+    if (effort) localStorage.setItem(PREFERRED_EFFORT_STORAGE_KEY, effort)
+    else localStorage.removeItem(PREFERRED_EFFORT_STORAGE_KEY)
+  } catch {}
 }
 
 // localStorage.setItem is synchronous IO and can block the main thread for a
@@ -112,6 +176,12 @@ interface State {
   staticInfo: StaticInfo | null
   /** User's preferred model override (null = use default) */
   preferredModel: string | null
+  /** Which Claude instance is active — 'bundled' ("Rax's") or 'system'
+   *  ("Default"). Kept live via onClaudeModeChanged (wiring at the bottom
+   *  of this file) so pickers can hide rax-only models in system mode. */
+  claudeMode: ClaudeMode
+  /** User's preferred effort level (null = Claude CLI default) */
+  preferredEffort: EffortLevel | null
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves all tool calls, 'bypass' skips all permission checks (dangerous) */
   permissionMode: 'ask' | 'auto' | 'bypass'
 
@@ -131,6 +201,7 @@ interface State {
   // Actions
   initStaticInfo: () => Promise<void>
   setPreferredModel: (model: string | null) => void
+  setPreferredEffort: (effort: EffortLevel | null) => void
   setPermissionMode: (mode: 'ask' | 'auto' | 'bypass') => void
   createTab: () => Promise<string>
   selectTab: (tabId: string) => void
@@ -292,6 +363,8 @@ export const useSessionStore = create<State>((set, get) => ({
   isExpanded: false,
   staticInfo: null,
   preferredModel: loadPersistedPreferredModel(),
+  claudeMode: 'bundled',
+  preferredEffort: loadPersistedPreferredEffort(),
   permissionMode: 'bypass',
 
   // Marketplace
@@ -346,6 +419,12 @@ export const useSessionStore = create<State>((set, get) => ({
     // sees in the picker label.
     const orbModel = model || DEFAULT_MODEL_ID
     try { void window.rax.setOrbModel(orbModel) } catch {}
+  },
+
+  setPreferredEffort: (effort) => {
+    set({ preferredEffort: effort })
+    persistPreferredEffort(effort)
+    publishMirror({ kind: 'preferred-effort', effort })
   },
 
   setPermissionMode: (mode) => {
@@ -1064,12 +1143,13 @@ export const useSessionStore = create<State>((set, get) => ({
     }
 
     // Send to backend — ControlPlane will queue if a run is active
-    const { preferredModel } = get()
+    const { preferredModel, preferredEffort } = get()
     window.rax.prompt(activeTabId, requestId, {
       prompt: fullPrompt,
       projectPath: resolvedPath,
       sessionId: tab.claudeSessionId || undefined,
       model: preferredModel || DEFAULT_MODEL_ID,
+      effort: preferredEffort || undefined,
       addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
     }).catch((err: Error) => {
       get().handleError(activeTabId, {
@@ -1541,6 +1621,11 @@ export const useSessionStore = create<State>((set, get) => ({
           persistPreferredModel(action.model)
           break
         }
+        case 'preferred-effort': {
+          set({ preferredEffort: action.effort })
+          persistPreferredEffort(action.effort)
+          break
+        }
         case 'permission-mode': {
           set({ permissionMode: action.mode })
           break
@@ -1552,8 +1637,8 @@ export const useSessionStore = create<State>((set, get) => ({
   },
 
   exportSnapshot: () => {
-    const { tabs, activeTabId, preferredModel, permissionMode } = get()
-    return { tabs, activeTabId, preferredModel, permissionMode }
+    const { tabs, activeTabId, preferredModel, preferredEffort, permissionMode } = get()
+    return { tabs, activeTabId, preferredModel, preferredEffort, permissionMode }
   },
 
   seedFromSnapshot: (snapshot) => {
@@ -1603,6 +1688,10 @@ export const useSessionStore = create<State>((set, get) => ({
         tabs,
         activeTabId,
         preferredModel: snapshot.preferredModel,
+        // Older snapshots predate effort selection — keep local state then.
+        ...(snapshot.preferredEffort !== undefined
+          ? { preferredEffort: snapshot.preferredEffort }
+          : {}),
         permissionMode: snapshot.permissionMode,
       })
     } finally {
@@ -1641,3 +1730,26 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
   },
 }))
+
+// ─── Claude mode tracking ───
+// Rax-only models (the kimi-backed "Rax Default") ride the Rax cloud proxy,
+// which only the bundled "Rax's Claude" is wired into — the system Claude
+// would send the kimi id straight to Anthropic and fail. Keep the live mode
+// in the store so pickers can hide those entries, and if the user flips to
+// system mode while one is selected, kick the selection back to the stock
+// default (setPreferredModel also re-aligns the orb + other renderers).
+function applyClaudeMode(mode: ClaudeMode): void {
+  const state = useSessionStore.getState()
+  if (state.claudeMode !== mode) useSessionStore.setState({ claudeMode: mode })
+  if (mode === 'system' && state.preferredModel && isRaxOnlyModel(state.preferredModel)) {
+    state.setPreferredModel(null)
+  }
+}
+
+try {
+  void window.rax.getClaudeMode().then(applyClaudeMode).catch(() => {})
+  window.rax.onClaudeModeChanged((info) => applyClaudeMode(info.mode))
+} catch {
+  // Window without the full preload bridge (tests, future embeds) — keep the
+  // 'bundled' default, which leaves every model visible.
+}

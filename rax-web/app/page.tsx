@@ -4,6 +4,8 @@ import { redirect } from 'next/navigation'
 import { supabaseServer } from '@/lib/supabase-server'
 import LoginForm from './login-form'
 import LiveDemo from './_components/live-demo'
+import NotchDemo from './_components/notch-demo'
+import MascotShowcase from './_components/mascot-showcase'
 import { BeamButton } from './_components/beam-button'
 
 export default async function HomePage({
@@ -20,6 +22,7 @@ export default async function HomePage({
     <main className="relative min-h-screen flex flex-col overflow-x-hidden">
       <TopBar />
       <Hero />
+      <MeetTheLittleGuy />
       <Crew />
       <Capabilities />
       <LiveSection />
@@ -44,7 +47,7 @@ function Hero() {
             <span className="text-muted">on your desktop.</span>
           </h1>
           <p className="text-[17px] sm:text-[18px] leading-relaxed text-muted max-w-[52ch]">
-            Five named agents — voice orb, floating dock, live preview.
+            Five named agents — a living notch companion, floating dock, live preview.
             Free to install. Pay only for the tokens the crew burns.
           </p>
           <div className="flex flex-wrap items-center gap-3 pt-1">
@@ -89,6 +92,31 @@ function Hero() {
             ))}
           </div>
         </div>
+      </div>
+    </section>
+  )
+}
+
+/* ─────────────────────────── Meet the little guy ─────────────────────────── */
+
+function MeetTheLittleGuy() {
+  return (
+    <section className="px-5 sm:px-8 pb-20 sm:pb-28 overflow-hidden">
+      <div className="max-w-[1240px] mx-auto">
+        <div className="text-center space-y-5 mb-2 enter enter-d2">
+          <span className="eyebrow-pill mx-auto">
+            <span className="dot" /> the notch companion
+          </span>
+          <h2 className="display-lg">
+            Say hello to <span className="script text-lime-deep text-[1.1em]">the little guy.</span>
+          </h2>
+          <p className="text-[16px] sm:text-[17px] leading-relaxed text-muted max-w-[56ch] mx-auto">
+            He lives wrapped around your MacBook&rsquo;s notch. Hold <span className="cmd">⌥+R</span> and
+            talk — he leans in, thinks with the crew, and answers out loud while the work
+            floats in around him.
+          </p>
+        </div>
+        <MascotShowcase />
       </div>
     </section>
   )
@@ -236,22 +264,22 @@ function Capabilities() {
         </h2>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-          {/* Orb */}
+          {/* Notch */}
           <article className="card card-hover overflow-hidden p-7 space-y-5">
             <div className="flex items-start justify-between">
-              <span className="sticker sticker-lime">orb</span>
+              <span className="sticker sticker-lime">notch</span>
               <span className="font-mono text-[10.5px] tracking-[0.2em] uppercase text-muted">01 / 03</span>
             </div>
-            <div className="flex justify-center py-3">
-              <div className="orb orb-lg" aria-hidden />
+            <div className="py-3">
+              <NotchDemo />
             </div>
             <h3 className="font-display font-bold text-[26px] tracking-[-0.02em] text-ink">
-              Always-on voice orb
+              He lives in your notch
             </h3>
             <p className="text-[14.5px] text-muted leading-relaxed">
-              A Siri-style orb that floats above every window. Hold <span className="cmd">⌥+R</span> to
-              speak. It glows while the crew thinks, dims when it&rsquo;s done. Captions follow
-              you across spaces.
+              A little robot wrapped around the menu-bar notch. Hold <span className="cmd">⌥+R</span> to
+              speak — he leans in while you talk, gazes off while the crew thinks, and dances
+              to his own voice when he answers. Try his moods above.
             </p>
           </article>
 
@@ -333,7 +361,7 @@ function LiveSection() {
             </h2>
             <p className="text-[15.5px] leading-relaxed text-muted max-w-[40ch]">
               Talk to one, the others quiet down. Talk to nobody, Max routes for you.
-              Every turn shows up in the caption pill — even when Rax is behind another window.
+              Every turn shows up in the notch bar — even when Rax is behind another window.
             </p>
             <ul className="space-y-3 text-[14.5px] text-ink">
               <li className="flex items-center gap-3">

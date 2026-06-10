@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Microphone, ArrowUp, SpinnerGap, X, Check, Waveform, ArrowCounterClockwise } from '@phosphor-icons/react'
-import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
+import { useSessionStore, EFFORT_LEVELS, useSelectableModels } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
 import { LiveWaveform } from './LiveWaveform'
@@ -98,10 +98,13 @@ export function InputBar() {
   const removeAttachment = useSessionStore((s) => s.removeAttachment)
 
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
+  const setPreferredEffort = useSessionStore((s) => s.setPreferredEffort)
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const preferredModel = useSessionStore((s) => s.preferredModel)
+  const preferredEffort = useSessionStore((s) => s.preferredEffort)
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const tab = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
+  const selectableModels = useSelectableModels()
   const colors = useColors()
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
   const isConnecting = tab?.status === 'connecting'
@@ -244,12 +247,22 @@ export function InputBar() {
         const model = tab?.sessionModel || null
         const version = tab?.sessionVersion || staticInfo?.version || null
         const current = preferredModel || model || 'default'
-        const lines = AVAILABLE_MODELS.map((m) => {
+        const lines = selectableModels.map((m) => {
           const active = m.id === current || (!preferredModel && m.id === model)
           return `  ${active ? '\u25CF' : '\u25CB'} ${m.label} (${m.id})`
         })
         const header = 'Rax'
         addSystemMessage(`${header}\n\n${lines.join('\n')}\n\nSwitch model: type /model <name>\n  e.g. /model sonnet`)
+        break
+      }
+      case '/effort': {
+        const lines = [
+          `  ${preferredEffort === null ? '\u25CF' : '\u25CB'} Default (let Claude decide)`,
+          ...EFFORT_LEVELS.map((e) =>
+            `  ${preferredEffort === e.id ? '\u25CF' : '\u25CB'} ${e.label} (${e.id}) \u2014 ${e.hint}`
+          ),
+        ]
+        addSystemMessage(`Effort\n\n${lines.join('\n')}\n\nSwitch effort: type /effort <level>\n  e.g. /effort xhigh \u2014 or /effort default`)
         break
       }
       case '/mcp': {
@@ -282,6 +295,7 @@ export function InputBar() {
           '/clear — Clear conversation history',
           '/cost — Show token usage and cost',
           '/model — Show model info & switch models',
+          '/effort — Show & switch effort level',
           '/mcp — Show MCP server status',
           '/skills — Show available skills',
           '/help — Show this list',
@@ -290,7 +304,7 @@ export function InputBar() {
         break
       }
     }
-  }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel])
+  }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel, preferredEffort])
 
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
     const isSkillCommand = !!tab?.sessionSkills?.includes(cmd.command.replace(/^\//, ''))
@@ -315,10 +329,31 @@ export function InputBar() {
       }
     }
     const prompt = input.trim()
+    const effortMatch = prompt.match(/^\/effort\s+(\S+)/i)
+    if (effortMatch) {
+      const query = effortMatch[1].toLowerCase()
+      setInput('')
+      setSlashFilter(null)
+      if (query === 'default' || query === 'auto' || query === 'none') {
+        setPreferredEffort(null)
+        addSystemMessage('Effort reset to default.')
+      } else {
+        const match = EFFORT_LEVELS.find((e) =>
+          e.id === query || e.label.toLowerCase().replace('-', '') === query.replace('-', '')
+        )
+        if (match) {
+          setPreferredEffort(match.id)
+          addSystemMessage(`Effort set to ${match.label} (${match.id}).`)
+        } else {
+          addSystemMessage(`Unknown effort "${effortMatch[1]}". Available: low, medium, high, xhigh, max, default`)
+        }
+      }
+      return
+    }
     const modelMatch = prompt.match(/^\/model\s+(\S+)/i)
     if (modelMatch) {
       const query = modelMatch[1].toLowerCase()
-      const match = AVAILABLE_MODELS.find((m: { id: string; label: string }) =>
+      const match = selectableModels.find((m: { id: string; label: string }) =>
         m.id.toLowerCase().includes(query) || m.label.toLowerCase().includes(query)
       )
       if (match) {

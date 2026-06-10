@@ -60,6 +60,13 @@ const SPRING_DAMPING = 0.30
 const REST_EPSILON = 0.01
 
 const TOAST_TTL_MS = 6500
+// Activity-driven presence: when the dock was auto-shown (crew dispatch /
+// completion), it tucks itself away this long after the crew goes quiet —
+// nothing running, all toasts expired, cursor elsewhere.
+const QUIET_GRACE_MS = 5000
+// Slide-out duration before acking main's hide request (matches the
+// .is-leaving CSS transition, plus a paint of slack).
+const LEAVE_ANIM_MS = 260
 // Upper bound on the per-turn text buffer used as a fallback when
 // task_complete arrives without a `result` field. We keep the HEAD of the
 // stream (slice(0, …)) because the recap pulls the first sentence — extra
@@ -152,6 +159,14 @@ export default function App() {
   const [hovered, setHovered] = useState<string | null>(null)
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [isDark, setIsDark] = useState(true)
+  // Presence mode pushed by main after every show: autoHide=true means this
+  // appearance was activity-driven and the dock should tuck itself away when
+  // the crew goes quiet; false means the user pinned it.
+  const [autoHide, setAutoHide] = useState(true)
+  // Slide-out in progress (CSS class); the window hides when it finishes.
+  const [leaving, setLeaving] = useState(false)
+  // Cursor over any interactive dock UI — never tuck away under the user.
+  const [overUi, setOverUi] = useState(false)
 
   const dockColumnRef = useRef<HTMLDivElement | null>(null)
   const lastIgnoredRef = useRef<boolean | null>(null)
@@ -202,6 +217,40 @@ export default function App() {
     window.dock.getTheme().then(({ isDark: d }) => setIsDark(d)).catch(() => {})
     return window.dock.onThemeChange((d) => setIsDark(d))
   }, [])
+
+  // ─── Presence mode ───
+  // The push arrives right after every window show — it both updates the
+  // mode AND resets the tucked pose, so a re-shown dock always GLIDES in
+  // from the edge (every hide leaves the column tucked, see onSlideOut).
+  useEffect(() => {
+    return window.dock.onMode((mode) => {
+      setAutoHide(mode.autoHide)
+      setLeaving(false)
+    })
+  }, [])
+
+  // ─── Animated hide handshake ───
+  // EVERY hide (toggle / tray / rax_set_dock / orb-companion / quiet-grace)
+  // arrives here from main: glide the column out, then ack so main hides
+  // the now-empty window. The column stays in the tucked pose while hidden,
+  // which is exactly the start pose the next show glides in from.
+  useEffect(() => {
+    return window.dock.onSlideOut(() => {
+      setLeaving(true)
+      window.setTimeout(() => window.dock.slideOutDone(), LEAVE_ANIM_MS)
+    })
+  }, [])
+
+  // ─── Quiet-grace auto-tuck ───
+  // When the grace elapses we just REQUEST the hide — main routes it back
+  // through the slide-out handshake above, same as every other hide path.
+  const anyRunning = Object.values(agentStates).some((s) => s.status === 'running')
+  useEffect(() => {
+    if (!autoHide || leaving) return
+    if (anyRunning || toasts.length > 0 || overUi) return
+    const t = window.setTimeout(() => window.dock.autoHide(), QUIET_GRACE_MS)
+    return () => window.clearTimeout(t)
+  }, [autoHide, leaving, anyRunning, toasts.length, overUi])
 
   // ─── Seed initial state from main's snapshot ───
   useEffect(() => {
@@ -421,6 +470,7 @@ export default function App() {
       const inColumn = hitTest(dockColumnRef.current, e.clientX, e.clientY)
       const inToasts = hitTest(toastListRef.current, e.clientX, e.clientY)
       const overUI = inColumn || inToasts
+      setOverUi(overUI)
       const shouldIgnore = !overUI
       if (shouldIgnore !== lastIgnoredRef.current) {
         lastIgnoredRef.current = shouldIgnore
@@ -429,6 +479,7 @@ export default function App() {
       }
     }
     const onLeave = () => {
+      setOverUi(false)
       if (lastIgnoredRef.current !== true) {
         lastIgnoredRef.current = true
         window.dock.setIgnoreMouseEvents(true, { forward: true })
@@ -642,7 +693,7 @@ export default function App() {
       : -100
 
   return (
-    <div className="dock-root">
+    <div className={`dock-root${leaving ? ' is-leaving' : ''}`}>
       <div
         ref={dockColumnRef}
         className="dock-column"

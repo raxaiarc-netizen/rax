@@ -7,7 +7,7 @@ import { useSessionStore } from '../stores/sessionStore'
 import { useThemeStore } from '../theme'
 import type { SidebarSection } from './App'
 import type { TabStatus } from '../../shared/types'
-import { AGENTS, getAgent } from '../../shared/agents'
+import { getAgent } from '../../shared/agents'
 
 // Slim projection used by Sidebar. Subscribing to the full tabs array makes
 // Sidebar re-render on every streaming token because messages[] changes the
@@ -29,12 +29,6 @@ interface SidebarTab {
 
 interface SidebarSelection {
   visibleTabs: SidebarTab[]
-  agentStatuses: Record<string, {
-    status: TabStatus
-    hasUnread: boolean
-    hasPermission: boolean
-    hidden: boolean
-  }>
   activeTabId: string | null
   activeTabIsEmpty: boolean
 }
@@ -49,26 +43,6 @@ function sameSidebarTab(a: SidebarTab, b: SidebarTab): boolean {
     && a.agentId === b.agentId
 }
 
-function sameAgentStatuses(
-  a: SidebarSelection['agentStatuses'],
-  b: SidebarSelection['agentStatuses'],
-): boolean {
-  for (const def of AGENTS) {
-    const x = a[def.id]
-    const y = b[def.id]
-    if (!x || !y) return false
-    if (
-      x.status !== y.status
-      || x.hasUnread !== y.hasUnread
-      || x.hasPermission !== y.hasPermission
-      || x.hidden !== y.hidden
-    ) {
-      return false
-    }
-  }
-  return true
-}
-
 function sameSelection(a: SidebarSelection | null, b: SidebarSelection): boolean {
   if (!a) return false
   if (a.activeTabId !== b.activeTabId) return false
@@ -77,7 +51,6 @@ function sameSelection(a: SidebarSelection | null, b: SidebarSelection): boolean
   for (let i = 0; i < a.visibleTabs.length; i++) {
     if (!sameSidebarTab(a.visibleTabs[i], b.visibleTabs[i])) return false
   }
-  if (!sameAgentStatuses(a.agentStatuses, b.agentStatuses)) return false
   return true
 }
 
@@ -94,24 +67,15 @@ export function Sidebar({ section, collapsed, onNavigate }: {
   const setThemeMode = useThemeStore((s) => s.setThemeMode)
 
   const prevSelectionRef = useRef<SidebarSelection | null>(null)
-  const { visibleTabs, agentStatuses, activeTabId, activeTabIsEmpty } = useSessionStore((s) => {
+  const { visibleTabs, activeTabId, activeTabIsEmpty } = useSessionStore((s) => {
     const visible: SidebarTab[] = []
     let activeIsEmpty = false
-    const agentStatusMap: SidebarSelection['agentStatuses'] = {}
     for (const t of s.tabs) {
       if (t.isOrbTab) continue
       if (t.agentId) {
-        // Track agent state separately for the "Agents" row group — these
-        // never show up in the regular chat list.
-        agentStatusMap[t.agentId] = {
-          status: t.status,
-          hasUnread: t.hasUnread,
-          hasPermission: t.permissionQueue.length > 0,
-          hidden: !!t.hidden,
-        }
-        // BUT — once the user un-hides an agent (via dock click), it ALSO
-        // surfaces in the chat list so they can switch back and forth like
-        // any other chat. The roster row stays as a quick-access anchor.
+        // Agent tabs stay out of the sidebar unless the user un-hides one
+        // via the floating dock — then it surfaces in the chat list so they
+        // can switch back and forth like any other chat.
         if (!t.hidden) {
           visible.push({
             id: t.id,
@@ -137,7 +101,6 @@ export function Sidebar({ section, collapsed, onNavigate }: {
     }
     const next: SidebarSelection = {
       visibleTabs: visible,
-      agentStatuses: agentStatusMap,
       activeTabId: s.activeTabId,
       activeTabIsEmpty: activeIsEmpty,
     }
@@ -187,33 +150,6 @@ export function Sidebar({ section, collapsed, onNavigate }: {
           active={section === 'project'}
           onClick={() => onNavigate('project')}
         />
-      </div>
-
-      {/* Agents row group — the dock's roster surfaced inside the fullscreen
-          sidebar. Clicking an agent un-hides + selects it (same path as
-          clicking it on the floating dock). Always shows all 5 so the user
-          has a single source of truth for "who exists." */}
-      <div className="fs-sidebar-section">
-        <span>Agents</span>
-        <span className="fs-sidebar-section-hint" title="Open the floating dock (⌘⇧D)">⌘⇧D</span>
-      </div>
-      <div className="fs-agent-list">
-        {AGENTS.map((def) => {
-          const st = agentStatuses[def.id]
-          const active = activeTabId === def.id && section === 'chat'
-          return (
-            <AgentRosterRow
-              key={def.id}
-              agentId={def.id}
-              active={active}
-              status={st?.status ?? 'idle'}
-              hasUnread={!!st?.hasUnread}
-              hasPermission={!!st?.hasPermission}
-              hidden={st?.hidden ?? true}
-              onSelect={() => onNavigate('chat', def.id)}
-            />
-          )
-        })}
       </div>
 
       <div className="fs-sidebar-section">
@@ -381,78 +317,6 @@ const ChatRow = React.memo(function ChatRow({
           <X size={11} />
         </button>
       )}
-    </div>
-  )
-})
-
-// Compact row used in the "Agents" roster section. Always renders all 5
-// agents regardless of `hidden` — the section IS the dock equivalent inside
-// fullscreen, so it needs to be the place a user comes to find their roster.
-// Clicking an agent here un-hides + selects (same path as the dock click).
-const AgentRosterRow = React.memo(function AgentRosterRow({
-  agentId, active, status, hasUnread, hasPermission, hidden, onSelect,
-}: {
-  agentId: string
-  active: boolean
-  status: TabStatus
-  hasUnread: boolean
-  hasPermission: boolean
-  hidden: boolean
-  onSelect: () => void
-}) {
-  const agent = getAgent(agentId)
-  if (!agent) return null
-  const accent = agent.accent
-
-  // Run-state pip — running pulses with accent; completed/unread shows soft
-  // green to mirror the dock's behavior; idle is invisible so the section
-  // looks calm by default.
-  let pip = 'transparent'
-  let pulse = false
-  let glow = false
-  if (status === 'dead' || status === 'failed') {
-    pip = 'var(--fs-pastel-rose-fg, #ff6b6b)'
-  } else if (hasPermission) {
-    pip = accent
-    glow = true
-  } else if (status === 'connecting' || status === 'running') {
-    pip = accent
-    pulse = true
-  } else if (hasUnread) {
-    pip = 'var(--fs-pastel-green-fg, #5dd5a8)'
-  }
-
-  return (
-    <div
-      className={`fs-chat-row fs-agent-row${active ? ' is-active' : ''}${hidden ? ' is-dormant' : ''}`}
-      onClick={onSelect}
-      title={`${agent.name} — ${agent.tagline}${hidden ? '' : ' (open in chat)'}`}
-      style={
-        active
-          ? ({ borderLeft: `2px solid ${accent}`, paddingLeft: 10 } as React.CSSProperties)
-          : undefined
-      }
-    >
-      <span
-        className="fs-agent-glyph"
-        aria-hidden
-        style={{
-          color: accent,
-          background: `color-mix(in srgb, ${accent} ${hidden ? 8 : 14}%, transparent)`,
-          border: `1px solid color-mix(in srgb, ${accent} ${hidden ? 18 : 30}%, transparent)`,
-        }}
-      >
-        {agent.glyph}
-      </span>
-      <span className="fs-chat-title" style={{ flex: 1, opacity: hidden ? 0.7 : 1 }}>{agent.name}</span>
-      <span
-        className={`fs-chat-dot ${pulse ? 'fs-pulse' : ''}`}
-        style={{
-          background: pip,
-          ...(glow ? { boxShadow: `0 0 6px 2px ${accent}` } : {}),
-        }}
-        aria-hidden="true"
-      />
     </div>
   )
 })

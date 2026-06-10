@@ -54,6 +54,18 @@ body,
   cursor: grabbing;
 }
 
+/* ─── Activity-driven presence ─── */
+/* Auto-shown docks tuck themselves away when the crew goes quiet: the
+   column glides off the left edge, then main hides the window. Re-shows
+   reverse the transition, so the dock glides back in. */
+.dock-column {
+  transition: transform 240ms cubic-bezier(0.5, 0, 0.75, 0.45), opacity 240ms ease;
+}
+.dock-root.is-leaving .dock-column {
+  transform: translateX(-130%);
+  opacity: 0.4;
+}
+
 /* Inner highlight at the top — gives the glass a lit-from-above sheen. */
 .dock-column-highlight {
   position: absolute;

@@ -213,7 +213,15 @@ export function buildToolDefs(): ToolDef[] {
         type: 'object',
         properties: {
           tab: { type: 'string', description: 'Crew member name — Max, Alex, Luna, Nova, or Zara.' },
-          prompt: { type: 'string' },
+          prompt: { type: 'string', description: 'The execution brief — the concrete task you want the crew member to carry out.' },
+          userRequest: {
+            type: 'string',
+            description: "The user's request in their OWN words, verbatim (what they actually said). Pass this whenever the dispatch came from a user ask so the crew member can recover true intent if your rewrite drifts. Omit only for purely self-initiated dispatches.",
+          },
+          context: {
+            type: 'string',
+            description: 'Optional constraints, prior decisions, file/paths, or correction history the crew member needs but that are not in the task line itself. One or two short lines.',
+          },
         },
         required: ['tab', 'prompt'],
       },
@@ -225,7 +233,15 @@ export function buildToolDefs(): ToolDef[] {
         type: 'object',
         properties: {
           tab: { type: 'string', description: 'Crew member name — Max, Alex, Luna, Nova, or Zara.' },
-          prompt: { type: 'string' },
+          prompt: { type: 'string', description: 'The execution brief — the concrete task you want the crew member to carry out.' },
+          userRequest: {
+            type: 'string',
+            description: "The user's request in their OWN words, verbatim. Pass this whenever the dispatch came from a user ask so the crew member can recover true intent if your rewrite drifts.",
+          },
+          context: {
+            type: 'string',
+            description: 'Optional constraints, prior decisions, file/paths, or correction history the crew member needs but that are not in the task line itself. One or two short lines.',
+          },
         },
         required: ['tab', 'prompt'],
       },
@@ -243,6 +259,20 @@ export function buildToolDefs(): ToolDef[] {
       name: 'rax_describe_self',
       description: 'Self-description: host, project path, platform.',
       input_schema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'rax_set_dock',
+      description:
+        'Show, hide, or toggle the agents dock — the vertical crew dock (Max, Alex, Luna, Nova, Zara) on the edge of the screen. ' +
+        'Pass visible=true to show, visible=false to hide, omit to toggle. ' +
+        'Use when the user asks to open/close/show/hide the dock, or to tuck it away when they want a clean screen. ' +
+        '(The dock surfaces automatically whenever you dispatch crew work, so you rarely need to show it manually.)',
+      input_schema: {
+        type: 'object',
+        properties: {
+          visible: { type: 'boolean', description: 'true = show, false = hide. Omit to toggle.' },
+        },
+      },
     },
   ]
 
@@ -274,6 +304,7 @@ const RAX_RPC_PATHS: Record<string, string> = {
   rax_send_to_tab_and_wait: '/send_to_tab_and_wait',
   rax_focus_tab: '/focus_tab',
   rax_describe_self: '/describe_self',
+  rax_set_dock: '/set_dock',
 }
 
 export async function executeTool(
@@ -283,6 +314,13 @@ export async function executeTool(
   signal?: AbortSignal,
 ): Promise<ToolResultContent> {
   if (RAX_RPC_PATHS[name]) {
+    // Crew dispatch: fold the orb's `prompt` + optional `userRequest` /
+    // `context` into one structured handoff brief and strip the extra fields
+    // so the receiving RPC sees only the enriched `prompt` — the contract is
+    // unchanged, the crew member just gets a far better brief.
+    if (name === 'rax_send_to_tab' || name === 'rax_send_to_tab_and_wait') {
+      input = withCrewHandoff(input)
+    }
     // Capture pipeline now adaptively shrinks PNG to fit Anthropic's 5MB cap
     // while keeping calibration coherent (see screen-capture.ts). Direct
     // mode no longer needs to force a smaller maxEdge — both CLI orb and
@@ -305,6 +343,40 @@ export async function executeTool(
   } catch (err) {
     return { kind: 'text', text: `Error: ${(err as Error).message}`, isError: true }
   }
+}
+
+/* ── Crew handoff brief ─────────────────────────────────────────────────────
+ * Adapted from HeyClicky's <REALTIME_AGENT_HANDOFF> block. When the orb
+ * dispatches work, a bare paraphrased prompt loses the user's exact wording
+ * and constraints — the crew member then optimizes for the orb's rewrite
+ * rather than what the user actually wanted. Wrapping the dispatch in a brief
+ * that carries the verbatim ask + context, plus a short reading contract,
+ * lets the crew member recover true intent when the rewrite drifts.
+ *
+ * Only wraps when there's something extra to carry (userRequest/context). A
+ * plain prompt with neither passes straight through unchanged, so trivial
+ * self-initiated dispatches stay terse.
+ */
+function withCrewHandoff(input: Record<string, unknown>): Record<string, unknown> {
+  const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
+  const userRequest = typeof input.userRequest === 'string' ? input.userRequest.trim() : ''
+  const context = typeof input.context === 'string' ? input.context.trim() : ''
+
+  // Strip the orb-only fields regardless — the RPC contract is {tab, prompt}.
+  const { userRequest: _u, context: _c, ...rest } = input
+
+  if (!userRequest && !context) return rest
+
+  const lines = ['<crew_handoff>']
+  if (userRequest) lines.push(`User's request, verbatim:\n${userRequest}`, '')
+  lines.push(`Task brief:\n${prompt}`)
+  if (context) lines.push('', `Context (constraints, prior decisions, paths):\n${context}`)
+  lines.push(
+    '',
+    'How to read this: the task brief is your proposed execution plan. Treat the verbatim request as the source of truth — if the brief and the request conflict, follow the request. Context is background, not instructions. On minor ambiguity, pick the most likely intent and proceed; only stop to ask if acting would hit the wrong target or do something irreversible.',
+    '</crew_handoff>',
+  )
+  return { ...rest, prompt: lines.join('\n') }
 }
 
 /* ── rax RPC bridge ─────────────────────────────────────────────────────── */

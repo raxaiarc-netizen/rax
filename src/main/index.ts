@@ -25,8 +25,10 @@ import type { RunOptions, NormalizedEvent, EnrichedError, DeviceMode, MirrorActi
 import { CodeModeController, type CodeModeBroadcast } from './code-mode'
 import { OrbController } from './orb'
 import { TTSManager } from './orb/tts'
-import { savePersistedVoice } from './orb/local-tts'
-import { isValidVoice } from '../shared/kokoro-voices'
+import { savePersistedVoice, getLocalTtsConfig, synthesizeToTempFile } from './orb/local-tts'
+import { isValidVoice, KOKORO_VOICES } from '../shared/kokoro-voices'
+import { DEFAULT_MASCOT_COLOR_ID, isValidMascotColor } from '../shared/mascot-colors'
+import { isAgentId } from '../shared/agents'
 import {
   ensureAccessibilityOnStartup,
   isAccessibilityGranted,
@@ -366,6 +368,11 @@ const orb = new OrbController({
   showPillWindow: () => showWindow('orb tool'),
   getProjectPath: () => process.cwd(),
   awaitTabIdle,
+  isOrbVisible: () => !!(orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()),
+  // rax_set_dock + dispatch auto-show — the voice agent and the dispatch
+  // path flip the dock through here; cause distinguishes explicit intent
+  // from activity-driven surfacing.
+  setDockVisible: (visible, cause) => setDockVisible(visible, cause),
 })
 
 // Wire computer-use MCP into chat-tab spawns. The provider returns null until
@@ -469,6 +476,14 @@ tts.on('done', (id: string) => {
     orbWindow.webContents.send(IPC.ORB_TTS_DONE, id)
   }
 })
+// Loudness timeline of the WAV that just started playing — the notch
+// waveform replays it against startedAtMs so the bars move with the real
+// voice (the renderer has no audio stream to analyse; afplay lives here).
+tts.on('levels', (payload: { id: string; startedAtMs: number; frameMs: number; levels: number[] }) => {
+  if (orbWindow && !orbWindow.isDestroyed()) {
+    orbWindow.webContents.send(IPC.ORB_TTS_LEVELS, payload)
+  }
+})
 
 // Forward TTS segment lifecycle to the caption-pill window so it can do
 // karaoke-style per-word highlighting. The pill anchors its rAF timer to
@@ -498,6 +513,20 @@ const whisperDaemon = new WhisperDaemon()
 controlPlane.on('event', (tabId: string, event: NormalizedEvent) => {
   broadcast('rax:normalized-event', tabId, event)
   orb.applyControlPlaneEvent(tabId, event)
+  // A crew member finishing while the dock tucked itself away brings it
+  // back to deliver the toast (the renderer then re-tucks after the quiet
+  // grace). Only in 'auto' mode — an explicitly hidden dock stays hidden
+  // (the orb's voice recap covers the completion) — and only while the orb
+  // is on screen, so a fully dismissed workspace never grows a dock.
+  if (
+    event.type === 'task_complete' &&
+    isAgentId(tabId) &&
+    dockIntent === 'auto' &&
+    !isDockVisible() &&
+    orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()
+  ) {
+    showDockWindow('auto')
+  }
 })
 
 controlPlane.on('tab-status-change', (tabId: string, newStatus: string, oldStatus: string) => {
@@ -1001,16 +1030,21 @@ function toggleFullscreenWindow(): void {
 }
 
 // ─── Voice Orb Window ───
-// Floating, transparent, frameless panel sized like a Siri orb. Summoned by
-// global shortcut or tray; click-outside / Esc dismisses. Reuses the existing
-// VoiceOrb canvas inside src/renderer/orb/.
+// Floating, transparent, frameless panel hosting the notch island UI
+// (src/renderer/orb/Notch.tsx). Summoned by global shortcut or tray;
+// Esc / shortcut dismisses.
 
-// Tight footprint — the window is just barely larger than the visible orb so
-// the user can park it anywhere on screen, including hard against the top
-// edge or over the menu bar. With size=100 in App.tsx the canvas is 200×200;
-// we keep ~10px margin for the rim glow shadow.
-const ORB_WINDOW_WIDTH = 220
-const ORB_WINDOW_HEIGHT = 220
+// The notch is a transparent strip pinned to the top-center of the screen,
+// hugging the hardware notch. Sized just past the widest bar state (460px)
+// plus shadow bleed, and tall enough for the bar + error toast — keeping
+// this always-on-top transparent surface small keeps the compositor cost
+// down. The strip is mostly click-through — only the bar grabs the pointer
+// (see the renderer's `.notch-shell` hit test).
+const ORB_WINDOW_WIDTH = 560
+// Tall enough for the bar's settings mode (152px panel) plus its drop
+// shadow and the error toast that parks below the expanded bar. The extra
+// strip is transparent and click-through, so it costs nothing.
+const ORB_WINDOW_HEIGHT = 210
 
 // Caption-pill window sits at the bottom-center of the display containing
 // the orb. Sized to comfortably fit the glass pill (max-width: 540px text +
@@ -1023,29 +1057,95 @@ const CAPTION_PILL_HEIGHT = 88
 // work area. Roughly matches the bottom inset of macOS notification banners.
 const CAPTION_PILL_BOTTOM_INSET = 36
 
-function orbStateFile(): string {
-  return join(app.getPath('userData'), 'orb-state.json')
+// Top-center, top-edge-flush bounds for the notch on a given display. The
+// window hugs `bounds.y` (the literal top of the screen) so the collapsed bar
+// sits where the hardware notch is.
+function computeNotchBounds(display: Electron.Display): { x: number; y: number; width: number; height: number } {
+  const b = display.bounds
+  const x = b.x + Math.round((b.width - ORB_WINDOW_WIDTH) / 2)
+  const y = b.y
+  return { x, y, width: ORB_WINDOW_WIDTH, height: ORB_WINDOW_HEIGHT }
 }
 
-interface OrbPersistedState { x: number; y: number }
+// Heuristic notch detection: notched MacBook panels report a tall menu-bar
+// inset (~32-38pt vs 24-25pt on plain displays), and only built-in panels
+// ever have a notch. With the menu bar set to auto-hide the inset reads 0
+// and we can't tell — assume notched for internal panels there (the failure
+// mode is just today's roomier clearance). External displays never notch.
+function displayHasNotch(display: Electron.Display): boolean {
+  if (process.platform !== 'darwin') return false
+  if (!display.internal) return false
+  const menuBarInset = display.workArea.y - display.bounds.y
+  return menuBarInset >= 30 || menuBarInset === 0
+}
 
-function loadOrbState(): OrbPersistedState | null {
+// Tell the orb renderer what kind of display it's sitting on so the island
+// can drop the hardware-notch clearance on notchless screens (external
+// monitors, older MacBooks) instead of rendering a hollow fake notch.
+function sendOrbDisplayProfile(): void {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  const b = orbWindow.getBounds()
+  const display = screen.getDisplayNearestPoint({
+    x: b.x + Math.round(b.width / 2),
+    y: b.y + Math.round(b.height / 2),
+  })
+  orbWindow.webContents.send(IPC.ORB_DISPLAY_PROFILE, { notched: displayHasNotch(display) })
+}
+
+// ─── Mascot colorway ───
+// Which visor color the notch mascot wears (Rax blue or one of the crew
+// skins — see shared/mascot-colors.ts). Same shape as the TTS voice setting:
+// a tiny userData JSON owned by main, pushed to the orb window on
+// renderer-ready and on every Settings change.
+
+function mascotColorFile(): string {
+  return join(app.getPath('userData'), 'orb-mascot-color.json')
+}
+
+// Lazy-loaded, then cached — reads once per app run, survives orb recreates.
+let orbMascotColorId: string | null = null
+
+function getOrbMascotColorId(): string {
+  if (orbMascotColorId) return orbMascotColorId
   try {
-    const raw = readFileSync(orbStateFile(), 'utf-8')
-    const parsed = JSON.parse(raw) as Partial<OrbPersistedState>
-    if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-      return { x: parsed.x, y: parsed.y }
+    const parsed = JSON.parse(readFileSync(mascotColorFile(), 'utf-8')) as { colorId?: unknown }
+    if (typeof parsed.colorId === 'string' && isValidMascotColor(parsed.colorId)) {
+      orbMascotColorId = parsed.colorId
+      return orbMascotColorId
     }
   } catch {}
-  return null
+  orbMascotColorId = DEFAULT_MASCOT_COLOR_ID
+  return orbMascotColorId
 }
 
-function saveOrbState(state: OrbPersistedState): void {
+function saveOrbMascotColor(colorId: string): boolean {
   try {
-    writeFileSync(orbStateFile(), JSON.stringify(state), 'utf-8')
+    writeFileSync(mascotColorFile(), JSON.stringify({ colorId }), 'utf-8')
+    return true
   } catch (err) {
-    log(`Failed to persist orb state: ${(err as Error).message}`)
+    log(`Failed to persist mascot color: ${(err as Error).message}`)
+    return false
   }
+}
+
+function sendOrbMascotColor(): void {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  orbWindow.webContents.send(IPC.ORB_MASCOT_COLOR, { colorId: getOrbMascotColorId() })
+}
+
+// Re-center the notch on whichever display now contains its center. Called on
+// display add/remove/metrics-changed so the island stays pinned to the top
+// notch instead of drifting off a reconfigured screen. The caption pill and
+// the display profile follow along.
+function recenterNotchWindow(): void {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  const b = orbWindow.getBounds()
+  const cx = b.x + Math.round(b.width / 2)
+  const cy = b.y + Math.round(b.height / 2)
+  const display = screen.getDisplayNearestPoint({ x: cx, y: cy })
+  orbWindow.setBounds(computeNotchBounds(display))
+  repositionCaptionPillWindow()
+  sendOrbDisplayProfile()
 }
 
 // Re-apply the floating + all-workspaces flags. macOS occasionally drops
@@ -1070,62 +1170,19 @@ function reassertOrbVisibility(reason: string, opts: { initial?: boolean } = {})
   }
 }
 
-// If the orb is parked on a display that's no longer connected (lid closed,
-// external monitor unplugged), nudge it back into the nearest visible display
-// so the user can still see and interact with it.
-function rescueOrbPositionIfOffscreen(): void {
-  if (!orbWindow || orbWindow.isDestroyed()) return
-  const b = orbWindow.getBounds()
-  const cx = b.x + Math.round(b.width / 2)
-  const cy = b.y + Math.round(b.height / 2)
-  const displays = screen.getAllDisplays()
-  const inside = displays.some((d) => {
-    const wa = d.workArea
-    return cx >= wa.x && cx <= wa.x + wa.width && cy >= wa.y && cy <= wa.y + wa.height
-  })
-  if (inside) return
-  const cursor = screen.getCursorScreenPoint()
-  const target = screen.getDisplayNearestPoint(cursor)
-  const inset = 20
-  const nx = target.workArea.x + target.workArea.width - b.width - inset
-  const ny = target.workArea.y + inset
-  log(`[orb] rescued off-screen orb to display ${target.id}`)
-  orbWindow.setBounds({ x: nx, y: ny, width: b.width, height: b.height })
-  saveOrbState({ x: nx, y: ny })
-}
-
 function createOrbWindow(): void {
   if (orbWindow && !orbWindow.isDestroyed()) {
     showOrbWindow()
     return
   }
 
-  // Restore prior position if we have one AND it falls within a currently
-  // connected display. Otherwise (or first launch) park in the top-right of
-  // the display under the cursor.
-  const saved = loadOrbState()
-  const savedIsVisible = saved
-    ? screen.getAllDisplays().some((d) => {
-        const cx = saved.x + Math.round(ORB_WINDOW_WIDTH / 2)
-        const cy = saved.y + Math.round(ORB_WINDOW_HEIGHT / 2)
-        const wa = d.workArea
-        return cx >= wa.x && cx <= wa.x + wa.width && cy >= wa.y && cy <= wa.y + wa.height
-      })
-    : false
-  let x: number
-  let y: number
-  if (saved && savedIsVisible) {
-    x = saved.x
-    y = saved.y
-  } else {
-    const cursor = screen.getCursorScreenPoint()
-    const display = screen.getDisplayNearestPoint(cursor)
-    const { width: sw } = display.workAreaSize
-    const { x: dx, y: dy } = display.workArea
-    const ORB_DEFAULT_INSET = 20
-    x = dx + sw - ORB_WINDOW_WIDTH - ORB_DEFAULT_INSET
-    y = dy + ORB_DEFAULT_INSET
-  }
+  // The notch is fixed at the top-center of the display under the cursor,
+  // flush with the very top edge (bounds.y, behind the menu bar / hardware
+  // notch — the screen-saver window level draws it over the menu bar). Unlike
+  // the old free-floating orb, it isn't draggable, so there's no saved
+  // position to restore.
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  const { x, y } = computeNotchBounds(display)
 
   orbWindow = new BrowserWindow({
     width: ORB_WINDOW_WIDTH,
@@ -1136,7 +1193,7 @@ function createOrbWindow(): void {
     frame: false,
     transparent: true,
     resizable: false,
-    movable: true,
+    movable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
@@ -1171,6 +1228,14 @@ function createOrbWindow(): void {
   orbWindow.once('ready-to-show', () => {
     orbWindow?.show()
     orbWindow?.focus()
+    // The pill's own ready-to-show only shows it when the orb is already
+    // visible (orphan-surface guard); if the pill readied first, that check
+    // failed and its once-handler is spent — show it from here instead.
+    // showInactive before ready-to-show is safe for a fully transparent
+    // window (nothing to flash).
+    if (captionPillWindow && !captionPillWindow.isDestroyed() && !captionPillWindow.isVisible()) {
+      captionPillWindow.showInactive()
+    }
     // Start fully click-through so the transparent corners pass clicks down to
     // the desktop. The renderer's mousemove handler turns capture back on
     // when the cursor enters the orb's circular hit zone, and back off when
@@ -1182,25 +1247,9 @@ function createOrbWindow(): void {
     }
   })
 
-  // Persist the orb's last position so a re-summon reuses it. Also reposition
-  // the caption pill when the orb crosses display boundaries — otherwise the
-  // pill stays on the original display until the next display-metrics-changed
-  // (could be never, if the user only ever drags between two static displays).
-  let lastOrbDisplayId: number | null = null
-  orbWindow.on('moved', () => {
-    if (!orbWindow || orbWindow.isDestroyed()) return
-    const b = orbWindow.getBounds()
-    saveOrbState({ x: b.x, y: b.y })
-    try {
-      const cx = b.x + Math.round(b.width / 2)
-      const cy = b.y + Math.round(b.height / 2)
-      const display = screen.getDisplayNearestPoint({ x: cx, y: cy })
-      if (lastOrbDisplayId !== null && display.id !== lastOrbDisplayId) {
-        repositionCaptionPillWindow()
-      }
-      lastOrbDisplayId = display.id
-    } catch {}
-  })
+  // No 'moved' bookkeeping: the notch is movable:false, and the only
+  // programmatic moves (recenterNotchWindow / showOrbWindow) reposition the
+  // caption pill and re-push the display profile themselves.
 
   orbWindow.on('closed', () => {
     orbWindow = null
@@ -1317,6 +1366,10 @@ function createCaptionPillWindow(): void {
   captionPillWindow.webContents.on('will-navigate', (e) => e.preventDefault())
 
   captionPillWindow.once('ready-to-show', () => {
+    // The orb can be dismissed inside the pill's sub-second spawn window —
+    // hideOrbWindow's hide() ran against a not-yet-shown pill, so showing
+    // unconditionally here would leave an orphan always-on-top surface.
+    if (!orbWindow || orbWindow.isDestroyed() || !orbWindow.isVisible()) return
     captionPillWindow?.showInactive()
     log(`[caption-pill] shown at ${x},${y} ${width}×${height}`)
     if (process.env.ELECTRON_RENDERER_URL) {
@@ -1350,15 +1403,34 @@ function repositionCaptionPillWindow(): void {
 function showOrbWindow(): void {
   if (!orbWindow || orbWindow.isDestroyed()) {
     createOrbWindow()
-    // The dock is a companion surface to the orb — it only appears while the
-    // orb is on screen. createDockWindow() creates if absent, otherwise shows.
-    createDockWindow()
+    // The dock stays hidden by default — it surfaces on crew dispatch, on
+    // completions (auto mode), or when explicitly toggled. A dock the user
+    // PINNED ('shown') before dismissing the orb comes back with it.
+    if (dockIntent === 'shown') showDockWindow('restore')
+    // Crew recaps that piled up while no orb existed get a voice again.
+    orb.flushPendingRecaps()
     return
   }
+  // Re-summon follows the user: pin to the display the cursor is on, not
+  // wherever the island was last dismissed — summoning on monitor B while
+  // it sits invisible on monitor A reads as "nothing happened".
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  orbWindow.setBounds(computeNotchBounds(display))
   reassertOrbVisibility('show')
   orbWindow.show()
   orbWindow.focus()
-  createDockWindow()
+  // Bring the caption pill back alongside (hidden with the orb) and move it
+  // to the same display.
+  if (captionPillWindow && !captionPillWindow.isDestroyed()) {
+    repositionCaptionPillWindow()
+    if (!captionPillWindow.isVisible()) captionPillWindow.showInactive()
+  } else {
+    createCaptionPillWindow()
+  }
+  sendOrbDisplayProfile()
+  if (dockIntent === 'shown') showDockWindow('restore')
+  // Recaps deferred while the orb was hidden can speak now.
+  orb.flushPendingRecaps()
   orb.ensureStarted().catch((err) => log(`Orb start error: ${(err as Error).message}`))
 }
 
@@ -1366,8 +1438,9 @@ function hideOrbWindow(): void {
   if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()) {
     orbWindow.hide()
     // Dock follows the orb — when the orb leaves the screen the dock goes
-    // with it. hideDockWindow() is idempotent if the dock isn't visible.
-    hideDockWindow()
+    // with it. 'companion' cause: this isn't a judgement about the dock, so
+    // a pinned ('shown') dock comes back on the next orb summon.
+    hideDockWindow('companion')
     // Kill any in-flight TTS up front so audio stops the moment the orb
     // disappears, instead of waiting for the renderer's onDismissed handler
     // to round-trip ttsCancel back through IPC (~50–100ms gap during which
@@ -1384,6 +1457,12 @@ function hideOrbWindow(): void {
     // response's last sentence keeps showing at the bottom of the screen
     // after the orb itself is gone).
     sendToCaptionPill({ type: 'orb_dismissed' })
+    // And hide the pill window itself — a dismissed orb shouldn't leave an
+    // invisible always-on-top compositor surface parked over every Space.
+    // showOrbWindow brings it back.
+    if (captionPillWindow && !captionPillWindow.isDestroyed() && captionPillWindow.isVisible()) {
+      captionPillWindow.hide()
+    }
     orbRendererBusy = false
     pendingForceListen = false
     pendingHoldStart = false
@@ -1469,6 +1548,57 @@ function saveDockState(state: DockPersistedState): void {
   }
 }
 
+// The notch carries a dock toggle button — keep it truthful no matter who
+// flipped visibility (notch button, tray menu, the orb's rax_set_dock tool,
+// or the dock window's own lifecycle).
+function isDockVisible(): boolean {
+  return !!(dockWindow && !dockWindow.isDestroyed() && dockWindow.isVisible())
+}
+
+function notifyOrbDockVisible(): void {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  orbWindow.webContents.send(IPC.ORB_DOCK_VISIBLE, { visible: isDockVisible() })
+}
+
+// ─── Dock presence model ───
+// The dock is activity-driven, not always-on. Three intents:
+//   'auto'   (default) — surfaces on crew dispatch / completions, and the
+//            RENDERER tucks it away (DOCK_AUTO_HIDE) once the crew goes
+//            quiet: nothing running, toasts expired, cursor elsewhere.
+//   'shown'  — the user explicitly summoned it (notch toggle / tray /
+//            "show the dock"): sticky until they hide it. Survives orb
+//            hide/show cycles.
+//   'hidden' — the user explicitly dismissed it: completions won't resurface
+//            it (the orb's voice recap covers them); the next crew DISPATCH
+//            starts a fresh episode and resets to 'auto'.
+type DockCause = 'user' | 'auto' | 'restore' | 'companion'
+let dockIntent: 'auto' | 'shown' | 'hidden' = 'auto'
+
+function sendDockMode(): void {
+  if (!dockWindow || dockWindow.isDestroyed()) return
+  dockWindow.webContents.send(IPC.DOCK_MODE, { autoHide: dockIntent === 'auto' })
+}
+
+/** Show / hide / toggle the agents dock. `visible === undefined` toggles.
+ *  Returns the resulting visibility — used by the notch toggle and the
+ *  orb's rax_set_dock tool. */
+function setDockVisible(visible?: boolean, cause: 'user' | 'auto' = 'user'): boolean {
+  const target = visible === undefined ? !isDockVisible() : visible
+  if (target) {
+    // A fresh dispatch reopens the episode even after an explicit hide —
+    // the user asked for dispatches to surface the dock; auto mode then
+    // bounds the irritation by tucking it away when the crew goes quiet.
+    if (!dockWindow || dockWindow.isDestroyed()) createDockWindow(cause)
+    else showDockWindow(cause)
+  } else {
+    hideDockWindow(cause)
+  }
+  // Report the TARGET: during the animated hide the window is technically
+  // still visible, and right after a cold create it isn't visible YET —
+  // either would mislead the notch toggle.
+  return target
+}
+
 function reassertDockVisibility(reason: string, opts: { initial?: boolean } = {}): void {
   if (!dockWindow || dockWindow.isDestroyed()) return
   try {
@@ -1484,11 +1614,12 @@ function reassertDockVisibility(reason: string, opts: { initial?: boolean } = {}
   }
 }
 
-function createDockWindow(): void {
+function createDockWindow(cause: DockCause = 'user'): void {
   if (dockWindow && !dockWindow.isDestroyed()) {
-    showDockWindow()
+    showDockWindow(cause)
     return
   }
+  applyDockIntent(cause)
 
   // Restore prior position if we have one and it's still on a connected
   // display. Otherwise park vertically centered against the left edge of the
@@ -1548,12 +1679,14 @@ function createDockWindow(): void {
 
   dockWindow.once('ready-to-show', () => {
     if (!dockWindow || dockWindow.isDestroyed()) return
-    // We only ever reach createDockWindow() from showOrbWindow(), so by the
-    // time this fires the caller wants the dock visible. The saved `visible`
-    // flag in dock-state.json is now ignored — visibility is always slaved to
-    // the orb. We only persist position so the dock returns to where the user
+    // createDockWindow() is only reached from an explicit show path (notch
+    // toggle, tray, rax_set_dock, crew-dispatch auto-show), so by the time
+    // this fires the caller wants the dock visible. The dock is hidden by
+    // default at start; we persist position so it returns to where the user
     // last parked it.
     dockWindow.show()
+    notifyOrbDockVisible()
+    sendDockMode()
     // Start fully click-through; the renderer flips capture back on when the
     // cursor enters the icon column. `forward: true` is critical so the
     // renderer still receives the mousemove that signals "you're over me".
@@ -1568,6 +1701,7 @@ function createDockWindow(): void {
 
   dockWindow.on('closed', () => {
     dockWindow = null
+    notifyOrbDockVisible()
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -1577,11 +1711,22 @@ function createDockWindow(): void {
   }
 }
 
-function showDockWindow(): void {
+function applyDockIntent(cause: DockCause): void {
+  if (cause === 'user') dockIntent = 'shown'
+  else if (cause === 'auto') dockIntent = 'auto'
+  // 'restore' / 'companion' leave intent untouched.
+}
+
+function showDockWindow(cause: DockCause = 'user'): void {
   if (!dockWindow || dockWindow.isDestroyed()) {
-    createDockWindow()
+    createDockWindow(cause)
     return
   }
+  applyDockIntent(cause)
+  // A show landing mid-slide-out rescues the dock: drop the pending hide;
+  // the DOCK_MODE push below resets the renderer's leaving pose so the
+  // column glides back in.
+  cancelPendingDockHide()
   reassertDockVisibility('show')
   dockWindow.show()
   const b = dockWindow.getBounds()
@@ -1589,23 +1734,50 @@ function showDockWindow(): void {
   // Tray label flips between "Show Agent Dock" and "Hide Agent Dock" based on
   // current visibility — keep the menu in sync on every toggle.
   rebuildTrayMenu()
+  notifyOrbDockVisible()
+  sendDockMode()
 }
 
-function hideDockWindow(): void {
+// In-flight animated hide. EVERY hide path routes through the renderer's
+// slide-out first (DOCK_SLIDE_OUT → DOCK_SLIDE_OUT_DONE) so the dock never
+// pops out of existence; the fallback timer covers a wedged renderer. A
+// show arriving mid-slide cancels the pending hide and the column glides
+// back in.
+let dockHidePending: NodeJS.Timeout | null = null
+
+function cancelPendingDockHide(): void {
+  if (dockHidePending) {
+    clearTimeout(dockHidePending)
+    dockHidePending = null
+  }
+}
+
+function finishDockHide(): void {
+  if (!dockHidePending) return
+  cancelPendingDockHide()
   if (!dockWindow || dockWindow.isDestroyed()) return
-  if (!dockWindow.isVisible()) return
   dockWindow.hide()
   const b = dockWindow.getBounds()
   saveDockState({ x: b.x, y: b.y, visible: false })
   rebuildTrayMenu()
+  notifyOrbDockVisible()
+}
+
+function hideDockWindow(cause: DockCause = 'user'): void {
+  if (cause === 'user') dockIntent = 'hidden'
+  if (!dockWindow || dockWindow.isDestroyed()) return
+  if (!dockWindow.isVisible()) return
+  if (dockHidePending) return // already gliding out
+  dockWindow.webContents.send(IPC.DOCK_SLIDE_OUT)
+  dockHidePending = setTimeout(finishDockHide, 500)
 }
 
 function toggleDockWindow(): void {
   if (dockWindow && !dockWindow.isDestroyed() && dockWindow.isVisible()) {
-    hideDockWindow()
+    hideDockWindow('user')
   } else {
-    if (!dockWindow || dockWindow.isDestroyed()) createDockWindow()
-    else showDockWindow()
+    if (!dockWindow || dockWindow.isDestroyed()) createDockWindow('user')
+    else showDockWindow('user')
   }
 }
 
@@ -2743,6 +2915,13 @@ function endHold(): void {
 
 ipcMain.on(IPC.ORB_RENDERER_READY, () => {
   log('Orb renderer ready — flushing any pending force-listen / hold-start')
+  // The renderer's IPC listeners exist now — safe to push the display
+  // profile (a did-finish-load push could land before React subscribes).
+  sendOrbDisplayProfile()
+  // Same timing rule for the mascot's persisted colorway and the dock
+  // toggle's initial state.
+  sendOrbMascotColor()
+  notifyOrbDockVisible()
   flushPendingForceListen()
   flushPendingHoldStart()
 })
@@ -2763,16 +2942,6 @@ ipcMain.on(IPC.ORB_VOICE_STATE, (_event, state: string) => {
 
 ipcMain.on(IPC.ORB_BUSY, (_event, busy: boolean) => {
   orbRendererBusy = !!busy
-})
-
-ipcMain.on(IPC.ORB_SET_POSITION, (_event, x: number, y: number) => {
-  if (!orbWindow || orbWindow.isDestroyed()) return
-  if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return
-  const b = orbWindow.getBounds()
-  const nx = Math.round(x)
-  const ny = Math.round(y)
-  orbWindow.setBounds({ x: nx, y: ny, width: b.width, height: b.height })
-  saveOrbState({ x: nx, y: ny })
 })
 
 ipcMain.handle(IPC.ORB_RESET_SESSION, () => {
@@ -2833,6 +3002,87 @@ ipcMain.handle(IPC.ORB_TTS_GET_VOICE, () => {
   return { voice: tts.getCurrentVoice() }
 })
 
+// ─── Voice preview (the "play" button beside the voice pickers) ───
+// Synthesizes a short sample in the REQUESTED voice via a config override —
+// the live TTSManager voice is untouched, so browsing voices never changes
+// what the orb actually speaks with until the user commits in the picker.
+let voicePreviewProc: ChildProcess | null = null
+let voicePreviewAbort: AbortController | null = null
+let voicePreviewGen = 0
+
+ipcMain.handle(IPC.ORB_TTS_PREVIEW, async (_event, voiceId: string) => {
+  if (typeof voiceId !== 'string' || !isValidVoice(voiceId)) {
+    return { ok: false, error: `unknown voice id: ${String(voiceId).slice(0, 40)}` }
+  }
+  const gen = ++voicePreviewGen
+  // One sample at a time: kill the previous preview and silence any orb
+  // speech so two voices never talk over each other.
+  try { voicePreviewAbort?.abort() } catch {}
+  if (voicePreviewProc) {
+    try { voicePreviewProc.kill() } catch {}
+    voicePreviewProc = null
+  }
+  tts.cancel()
+  const abort = new AbortController()
+  voicePreviewAbort = abort
+  let result: Awaited<ReturnType<typeof synthesizeToTempFile>> | null = null
+  try {
+    const meta = KOKORO_VOICES.find((v) => v.id === voiceId)
+    const sample = `Hey, I'm ${meta?.name ?? 'this voice'}. This is how I sound.`
+    const cfg = { ...getLocalTtsConfig(), voice: voiceId }
+    result = await synthesizeToTempFile(cfg, sample, abort.signal)
+    const synth = result
+    if (gen !== voicePreviewGen) {
+      synth.cleanup()
+      return { ok: false, error: 'superseded' }
+    }
+    await synth.ready
+    if (gen !== voicePreviewGen) {
+      synth.cleanup()
+      return { ok: false, error: 'superseded' }
+    }
+    const child = spawn('afplay', [synth.path])
+    voicePreviewProc = child
+    const done = (): void => {
+      if (voicePreviewProc === child) voicePreviewProc = null
+      synth.cleanup()
+    }
+    child.on('exit', done)
+    child.on('error', done)
+    const durationMs = Math.round((synth.envelope.levels?.length ?? 0) * (synth.envelope.frameMs ?? 0))
+    return { ok: true, voice: voiceId, durationMs }
+  } catch (err) {
+    // Synthesis can fail after the temp file was created (ready rejecting
+    // mid-stream) — don't leave the orphan behind.
+    try { result?.cleanup() } catch {}
+    return { ok: false, error: (err as Error).message }
+  }
+})
+
+ipcMain.handle(IPC.ORB_SET_MASCOT_COLOR, (_event, colorId: string) => {
+  // Reject unknown ids loudly so the Settings swatches can roll back
+  // instead of silently leaving the visor on its old color.
+  if (typeof colorId !== 'string' || !isValidMascotColor(colorId)) {
+    return { ok: false, error: `unknown mascot color: ${String(colorId).slice(0, 40)}` }
+  }
+  // Apply live first (in-memory + push to the orb window) — that always
+  // succeeds; only the disk write can fail.
+  orbMascotColorId = colorId
+  sendOrbMascotColor()
+  if (!saveOrbMascotColor(colorId)) {
+    return {
+      ok: false,
+      color: colorId,
+      error: 'color applied for this session but could not be saved to disk',
+    }
+  }
+  return { ok: true, color: colorId }
+})
+
+ipcMain.handle(IPC.ORB_GET_MASCOT_COLOR, () => {
+  return { color: getOrbMascotColorId() }
+})
+
 ipcMain.handle(IPC.ORB_SHOW, () => {
   showOrbWindow()
   return { ok: true }
@@ -2881,6 +3131,23 @@ ipcMain.on(IPC.DOCK_SET_POSITION, (_event, x: number, y: number) => {
   const ny = Math.max(minY, Math.min(maxY, Math.round(y)))
   const b = dockWindow.getBounds()
   dockWindow.setBounds({ x: nx, y: ny, width: b.width, height: b.height })
+})
+
+ipcMain.handle(IPC.ORB_TOGGLE_DOCK, () => {
+  const visible = setDockVisible(undefined, 'user')
+  return { ok: true, visible }
+})
+
+// Renderer finished its quiet-grace slide-out — hide without touching
+// intent, so the dock stays armed for the next burst of crew activity.
+ipcMain.on(IPC.DOCK_AUTO_HIDE, () => {
+  hideDockWindow('auto')
+})
+
+// Slide-out animation finished — complete the pending hide now instead of
+// waiting out the fallback timer.
+ipcMain.on(IPC.DOCK_SLIDE_OUT_DONE, () => {
+  finishDockHide()
 })
 
 ipcMain.handle(IPC.DOCK_SELECT_AGENT, (_event, agentId: string) => {
@@ -3356,19 +3623,19 @@ app.whenReady().then(async () => {
   // falls off-screen (e.g. external monitor unplugged).
   screen.on('display-added', () => {
     reassertOrbVisibility('display-added')
-    rescueOrbPositionIfOffscreen()
+    recenterNotchWindow()
     repositionCaptionPillWindow()
     reassertDockVisibility('display-added')
   })
   screen.on('display-removed', () => {
     reassertOrbVisibility('display-removed')
-    rescueOrbPositionIfOffscreen()
+    recenterNotchWindow()
     repositionCaptionPillWindow()
     reassertDockVisibility('display-removed')
   })
   screen.on('display-metrics-changed', () => {
     reassertOrbVisibility('display-metrics-changed')
-    rescueOrbPositionIfOffscreen()
+    recenterNotchWindow()
     repositionCaptionPillWindow()
     reassertDockVisibility('display-metrics-changed')
   })
@@ -3398,12 +3665,18 @@ app.whenReady().then(async () => {
   // post-crash respawns).
   globalShortcut.register('CommandOrControl+Shift+;', () => {
     pendingForceListen = true
-    if (!orbWindow || orbWindow.isDestroyed() || !orbWindow.isVisible()) {
+    if (!orbWindow || orbWindow.isDestroyed()) {
+      // Cold create — the renderer isn't mounted yet; ORB_RENDERER_READY
+      // flushes once it is. No timeout needed.
       showOrbWindow()
-      // ORB_RENDERER_READY will fire once mount completes; no timeout needed.
+    } else if (!orbWindow.isVisible()) {
+      // Window exists but is hidden: the renderer is mounted and its
+      // listener is live, but ORB_RENDERER_READY already fired long ago —
+      // nothing would ever flush the buffered intent. Show + flush now.
+      showOrbWindow()
+      flushPendingForceListen()
     } else {
-      // Already visible — try to flush immediately. If the renderer has
-      // already ready'd this still works because we send synchronously.
+      // Already visible — flush immediately.
       flushPendingForceListen()
     }
   })

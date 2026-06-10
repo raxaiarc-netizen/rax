@@ -28,6 +28,10 @@ const CHANNELS = {
   GET_THEME: 'rax:get-theme',
   THEME_CHANGED: 'rax:theme-changed',
   ORB_TOGGLE: 'rax:orb-toggle',
+  DOCK_MODE: 'rax:dock-mode',
+  DOCK_AUTO_HIDE: 'rax:dock-auto-hide',
+  DOCK_SLIDE_OUT: 'rax:dock-slide-out',
+  DOCK_SLIDE_OUT_DONE: 'rax:dock-slide-out-done',
 } as const
 
 export interface DockEventPayload {
@@ -62,6 +66,18 @@ export interface DockAPI {
   /** Toggle the voice orb window — called from the dock's voice cap so the
    *  user can summon Orb without leaving the dock surface. Idempotent. */
   toggleOrb(): Promise<{ ok: boolean }>
+  /** Presence mode, pushed by main after every show: autoHide=true means
+   *  the dock was surfaced by crew activity and should tuck itself away
+   *  (via autoHide()) once everything goes quiet; false means the user
+   *  pinned it. */
+  onMode(callback: (mode: { autoHide: boolean }) => void): () => void
+  /** The quiet grace elapsed — ask main for an auto-cause hide (which
+   *  routes back through onSlideOut for the animation). */
+  autoHide(): void
+  /** Main wants the window hidden: glide the column out, then ack with
+   *  slideOutDone() so main completes the hide. */
+  onSlideOut(callback: () => void): () => void
+  slideOutDone(): void
 }
 
 function wrap<T>(channel: string, callback: (payload: T) => void) {
@@ -125,6 +141,18 @@ const api: DockAPI = {
     return () => ipcRenderer.removeListener(CHANNELS.THEME_CHANGED, handler)
   },
   toggleOrb: () => ipcRenderer.invoke(CHANNELS.ORB_TOGGLE),
+  onMode: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, mode: { autoHide: boolean }) => callback(mode)
+    ipcRenderer.on(CHANNELS.DOCK_MODE, handler)
+    return () => ipcRenderer.removeListener(CHANNELS.DOCK_MODE, handler)
+  },
+  autoHide: () => ipcRenderer.send(CHANNELS.DOCK_AUTO_HIDE),
+  onSlideOut: (callback) => {
+    const handler = () => callback()
+    ipcRenderer.on(CHANNELS.DOCK_SLIDE_OUT, handler)
+    return () => ipcRenderer.removeListener(CHANNELS.DOCK_SLIDE_OUT, handler)
+  },
+  slideOutDone: () => ipcRenderer.send(CHANNELS.DOCK_SLIDE_OUT_DONE),
 }
 
 contextBridge.exposeInMainWorld('dock', api)

@@ -110,6 +110,17 @@ export interface RaxAPI {
    *  this on mount so its dropdown reflects the actual main-process
    *  truth rather than just localStorage. */
   getOrbVoice(): Promise<{ voice: string }>
+  /** Persist a mascot colorway id (shared/mascot-colors.ts) and live-push
+   *  it to the orb window. The Settings swatch row is the only call site.
+   *  Returns `{ok:false}` for ids outside the catalog. */
+  setOrbMascotColor(colorId: string): Promise<{ ok: boolean; color?: string; error?: string }>
+  /** Returns the mascot colorway main currently holds (persisted file >
+   *  default), for the Settings swatches' initial selection. */
+  getOrbMascotColor(): Promise<{ color: string }>
+  /** Play a short sample in the given voice WITHOUT changing the configured
+   *  voice — the picker's play button. Returns the sample's duration so the
+   *  button can show a playing state. */
+  previewOrbVoice(voiceId: string): Promise<{ ok: boolean; durationMs?: number; error?: string }>
 
   // ─── Claude instance (bundled vs system) ───
   getClaudeMode(): Promise<ClaudeMode>
@@ -304,6 +315,9 @@ const api: RaxAPI = {
   setOrbModel: (modelId: string) => ipcRenderer.invoke(IPC.ORB_SET_MODEL, modelId),
   setOrbVoice: (voiceId) => ipcRenderer.invoke(IPC.ORB_TTS_SET_VOICE, voiceId),
   getOrbVoice: () => ipcRenderer.invoke(IPC.ORB_TTS_GET_VOICE),
+  setOrbMascotColor: (colorId) => ipcRenderer.invoke(IPC.ORB_SET_MASCOT_COLOR, colorId),
+  getOrbMascotColor: () => ipcRenderer.invoke(IPC.ORB_GET_MASCOT_COLOR),
+  previewOrbVoice: (voiceId) => ipcRenderer.invoke(IPC.ORB_TTS_PREVIEW, voiceId),
 
   // ─── Claude instance ───
   getClaudeMode: () => ipcRenderer.invoke(IPC.CLAUDE_MODE_GET),

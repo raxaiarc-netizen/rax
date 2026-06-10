@@ -40,6 +40,19 @@ export interface OrbControllerDeps {
    * tear down listeners early when the orb's MCP HTTP request is cancelled.
    */
   awaitTabIdle: (tabId: string, timeoutMs: number, signal?: AbortSignal) => Promise<{ text: string; timedOut: boolean }>
+  /**
+   * Whether the orb window is currently on screen. The autonomous-recap
+   * flush consults this so a dismissed orb never speaks as a disembodied
+   * voice with no UI anywhere; showOrbWindow re-arms the flush on summon.
+   */
+  isOrbVisible?: () => boolean
+  /**
+   * Show / hide / toggle the agents dock (undefined toggles). Returns the
+   * resulting visibility. Backs the orb's `rax_set_dock` tool ('user'
+   * cause — sticky intent) and the dispatch auto-show ('auto' cause — the
+   * dock tucks itself away once the crew goes quiet).
+   */
+  setDockVisible: (visible?: boolean, cause?: 'user' | 'auto') => boolean
 }
 
 /**
@@ -143,6 +156,7 @@ export class OrbController extends EventEmitter {
       showPillWindow: deps.showPillWindow,
       getProjectPath: deps.getProjectPath,
       awaitTabIdle: wrappedAwait,
+      setDockVisible: deps.setDockVisible,
     })
   }
 
@@ -306,6 +320,19 @@ export class OrbController extends EventEmitter {
       log('submitTurn: session not alive, warming up before submit')
       this.session.warmup()
     }
+    if (this.session.isBusy()) {
+      // A previous turn is still draining — most commonly an autonomous
+      // recap the user never saw finish, or the tail of a gracefully
+      // interrupted turn. The user's spoken turn always wins: cancel and
+      // wait briefly for the abort to unwind instead of bubbling a
+      // "still responding" rejection into a red error toast.
+      log('submitTurn: session busy — cancelling previous turn before submit')
+      this.session.cancelTurn()
+      const deadline = Date.now() + 4_000
+      while (this.session.isBusy() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+    }
     await this.session.submitTurn(prompt, attachment)
   }
 
@@ -432,11 +459,28 @@ export class OrbController extends EventEmitter {
       // Orb is talking / thinking — submitSystemTurn would reject. The next
       // turn-end will re-arm us with POST_TURN_FLUSH_DELAY_MS.
       if (this.session.isBusy()) return
-      // User is mid-input ('listening' / 'transcribing' / 'thinking'). Don't
-      // step on them; the recap will get spliced into their turn as a
-      // kind="prepended" block once they submit.
-      if (this.lastVoiceState === 'listening' || this.lastVoiceState === 'transcribing' || this.lastVoiceState === 'thinking') {
+      // Orb dismissed — a recap now would be a disembodied voice with no UI
+      // anywhere on screen. Drop this attempt; showOrbWindow re-arms via
+      // flushPendingRecaps() and the completion TTL ages out stale news.
+      if (this.deps.isOrbVisible && !this.deps.isOrbVisible()) {
+        log('Autonomous flush deferred — orb window hidden')
+        return
+      }
+      // User is mid-input or the orb is still audibly speaking. 'talking'
+      // matters: the session's turn ends while TTS is still draining, so
+      // without it the recap splices into the tail of the previous answer —
+      // and a click to silence that tail destroys the recap with it.
+      if (
+        this.lastVoiceState === 'listening' ||
+        this.lastVoiceState === 'transcribing' ||
+        this.lastVoiceState === 'thinking' ||
+        this.lastVoiceState === 'talking'
+      ) {
         log(`Autonomous flush deferred — voice state '${this.lastVoiceState}'`)
+        // Re-arm rather than drop: TTS overhang routinely outlives the
+        // 700ms post-turn re-flush and nothing else would retry. Bounded —
+        // once the completions age past their TTL the timer body bails.
+        this._scheduleAutonomousFlush(1_500)
         return
       }
       this.session.submitSystemTurn().catch((err: Error) => {
@@ -444,5 +488,14 @@ export class OrbController extends EventEmitter {
       })
     }, delayMs)
     this.flushTimer.unref?.()
+  }
+
+  /**
+   * Re-arm the autonomous-recap flush. Called when the orb window is
+   * summoned so recaps that piled up while it was hidden get spoken now
+   * that there's a visible surface for them.
+   */
+  flushPendingRecaps(): void {
+    this._scheduleAutonomousFlush(800)
   }
 }

@@ -328,6 +328,10 @@ export class PtyRunManager extends EventEmitter {
     // Skip --model for kimi-*: the CLI rejects unknown ids locally before
     // they reach Moonshot. buildClaudeEnv injects ANTHROPIC_*_MODEL so the
     // spawn still resolves to the picked kimi model.
+    // Effort is Anthropic-only — skip it for kimi-* spawns as well.
+    if (options.effort && !(options.model || '').startsWith('kimi-')) {
+      args.push('--effort', options.effort)
+    }
     if (options.allowedTools?.length) {
       args.push('--allowedTools', options.allowedTools.join(','))
     }

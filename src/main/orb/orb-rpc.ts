@@ -43,6 +43,13 @@ export interface OrbRpcDeps {
    * claude was interrupted by the user).
    */
   awaitTabIdle: (tabId: string, timeoutMs: number, signal?: AbortSignal) => Promise<{ text: string; timedOut: boolean }>
+  /**
+   * Show / hide / toggle the agents dock window (undefined toggles).
+   * Returns the resulting visibility. 'user' cause = explicit, sticky
+   * intent (backs `/set_dock`); 'auto' = activity-driven surfacing that the
+   * dock will tuck away itself when the crew goes quiet.
+   */
+  setDockVisible: (visible?: boolean, cause?: 'user' | 'auto') => boolean
 }
 
 export interface OrbRpcInfo {
@@ -178,6 +185,9 @@ export class OrbRpcServer {
         case '/describe_self':
           send(200, this._describeSelf())
           return
+        case '/set_dock':
+          send(200, this._setDock(payload))
+          return
         case '/screenshot':
           send(200, await this._screenshot(payload))
           return
@@ -295,6 +305,11 @@ export class OrbRpcServer {
       .submitPrompt(snap.tabId, requestId, { prompt, projectPath: cwd })
       .catch((err) => log(`send_to_tab submitPrompt error: ${(err as Error).message}`))
 
+    // Crew got work — surface the dock so the user can watch the agent run.
+    // 'auto' cause: the dock earns its screen space for the episode, then
+    // tucks itself away once the crew goes quiet.
+    this.deps.setDockVisible(true, 'auto')
+
     return { tabId: snap.tabId, sent: true }
   }
 
@@ -321,6 +336,9 @@ export class OrbRpcServer {
     this.deps.controlPlane
       .submitPrompt(snap.tabId, requestId, { prompt, projectPath: cwd })
       .catch((err) => log(`send_to_tab_and_wait submitPrompt error: ${(err as Error).message}`))
+
+    // Crew got work — surface the dock so the user can watch the agent run.
+    this.deps.setDockVisible(true, 'auto')
 
     const result = await this.deps.awaitTabIdle(snap.tabId, 0, signal)
     return {
@@ -554,6 +572,21 @@ export class OrbRpcServer {
     const gx = cal.displayOriginX + x * sxX
     const gy = cal.displayOriginY + y * sxY
     return { x: gx, y: gy, calibrated: true }
+  }
+
+  private _setDock(payload: Record<string, unknown>): Record<string, unknown> {
+    // Explicit boolean sets the state; anything else toggles. 'user' cause:
+    // the model only calls this on behalf of an explicit ask, so the choice
+    // is sticky (no auto-tuck for a dock the user asked to see).
+    const requested = typeof payload.visible === 'boolean' ? payload.visible : undefined
+    const visible = this.deps.setDockVisible(requested, 'user')
+    return {
+      ok: true,
+      visible,
+      message: visible
+        ? 'Agents dock is now on screen.'
+        : 'Agents dock is now hidden.',
+    }
   }
 
   private _describeSelf(): Record<string, unknown> {

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Image from 'next/image'
+import { Mascot } from './mascot'
 
 type Agent = {
   name: string
@@ -146,7 +147,11 @@ export default function LiveDemo() {
               </button>
             )
           })}
-          <div className="mt-2 mx-auto orb orb-sm" aria-hidden />
+          {/* The notch mascot tags along under the crew, wearing the active
+              agent's colorway. */}
+          <div className="mt-2 mx-auto" aria-hidden>
+            <Mascot state="idle" colorId={scene.agent.accent} size={36} noDoze />
+          </div>
         </div>
 
         {/* Right column */}

@@ -5,7 +5,7 @@ import {
 } from '@phosphor-icons/react'
 import type { Icon } from '@phosphor-icons/react'
 import { useShallow } from 'zustand/react/shallow'
-import { useSessionStore, AVAILABLE_MODELS, getModelDisplayLabel } from '../stores/sessionStore'
+import { useSessionStore, EFFORT_LEVELS, getModelDisplayLabel, useSelectableModels } from '../stores/sessionStore'
 import { LiveWaveform } from '../components/LiveWaveform'
 import { useColors } from '../theme'
 import { DEFAULT_MODEL_ID } from '../../shared/types'
@@ -62,7 +62,10 @@ export function Composer({ floating = false, onCodeModeToggle }: {
   const removeAttachment = useSessionStore((s) => s.removeAttachment)
   const codeModeStatus = useSessionStore((s) => s.codeMode.status)
   const preferredModel = useSessionStore((s) => s.preferredModel)
+  const selectableModels = useSelectableModels()
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
+  const preferredEffort = useSessionStore((s) => s.preferredEffort)
+  const setPreferredEffort = useSessionStore((s) => s.setPreferredEffort)
   const permissionMode = useSessionStore((s) => s.permissionMode)
   const setPermissionMode = useSessionStore((s) => s.setPermissionMode)
   const setBaseDirectory = useSessionStore((s) => s.setBaseDirectory)
@@ -244,7 +247,10 @@ export function Composer({ floating = false, onCodeModeToggle }: {
   const codeModeOn = codeModeStatus === 'ready'
   const codeModeBusy = codeModeStatus === 'starting' || codeModeStatus === 'detecting' || codeModeStatus === 'stopping'
   const modelId = preferredModel || DEFAULT_MODEL_ID
-  const modelLabel = getModelDisplayLabel(modelId)
+  const effortLabel = EFFORT_LEVELS.find((e) => e.id === preferredEffort)?.label
+  const modelLabel = effortLabel
+    ? `${getModelDisplayLabel(modelId)} · ${effortLabel}`
+    : getModelDisplayLabel(modelId)
   const folderLabel = tabSlim?.hasChosenDirectory ? truncatePath(tabSlim.workingDirectory) : 'Choose folder'
 
   return (
@@ -400,7 +406,7 @@ export function Composer({ floating = false, onCodeModeToggle }: {
             {openMenu === 'model' && (
               <div className="fs-codex-menu fs-codex-menu-end" role="menu">
                 <div className="fs-codex-menu-heading">Model</div>
-                {AVAILABLE_MODELS.map((m) => (
+                {selectableModels.map((m) => (
                   <button
                     key={m.id}
                     type="button"
@@ -411,6 +417,31 @@ export function Composer({ floating = false, onCodeModeToggle }: {
                   >
                     <span className="fs-codex-menu-label">{getModelDisplayLabel(m.id)}</span>
                     {modelId === m.id && <Check size={13} weight="bold" />}
+                  </button>
+                ))}
+                <div className="fs-codex-menu-heading">Effort</div>
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={preferredEffort === null}
+                  className={`fs-codex-menu-item${preferredEffort === null ? ' is-active' : ''}`}
+                  onClick={() => { setPreferredEffort(null); setOpenMenu(null) }}
+                >
+                  <span className="fs-codex-menu-label">Default</span>
+                  {preferredEffort === null && <Check size={13} weight="bold" />}
+                </button>
+                {EFFORT_LEVELS.map((e) => (
+                  <button
+                    key={e.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={preferredEffort === e.id}
+                    className={`fs-codex-menu-item${preferredEffort === e.id ? ' is-active' : ''}`}
+                    title={e.hint}
+                    onClick={() => { setPreferredEffort(e.id); setOpenMenu(null) }}
+                  >
+                    <span className="fs-codex-menu-label">{e.label}</span>
+                    {preferredEffort === e.id && <Check size={13} weight="bold" />}
                   </button>
                 ))}
               </div>

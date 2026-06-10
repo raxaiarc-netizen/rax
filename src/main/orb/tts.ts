@@ -55,6 +55,9 @@ function log(msg: string): void {
  *                                        stays consistent
  *   - 'segment'     (TtsSegmentEvent)    audio started; payload anchors the
  *                                        caption pill's karaoke timer
+ *   - 'levels'      ({ id, startedAtMs,  audio started; loudness timeline of
+ *                      frameMs, levels })  the playing WAV so the notch wave
+ *                                        can track the real voice
  *   - 'alignment'   ({ id, alignment })  per-char timings delivered (fires
  *                                        once with Kokoro)
  *   - 'cancelled'   (id)                 cancel() killed an actively-playing
@@ -304,6 +307,15 @@ export class TTSManager extends EventEmitter {
       text,
       alignment: this._snapshotAlignment(synth.alignment),
       startedAtMs,
+    })
+
+    // Real loudness timeline of this very WAV — the notch waveform replays
+    // it against startedAtMs so the bars move with the actual voice.
+    this.emit('levels', {
+      id,
+      startedAtMs,
+      frameMs: synth.envelope.frameMs,
+      levels: synth.envelope.levels,
     })
 
     const offAlign = synth.onAlignmentChange(() => {
