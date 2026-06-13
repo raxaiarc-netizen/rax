@@ -4,7 +4,7 @@ import { homedir } from 'os'
 import { StreamParser } from '../stream-parser'
 import { normalize } from './event-normalizer'
 import { log as _log } from '../logger'
-import { buildClaudeEnv, buildClaudeSpawnInvocation } from './claude-instance'
+import { applyBalanceGate, buildClaudeEnv, buildClaudeSpawnInvocation } from './claude-instance'
 import { ensureTabMcpFiles, TAB_MCP_TOOL_NAMES } from './computer-use-mcp'
 import type { OrbRpcInfo } from '../orb/orb-rpc'
 import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
@@ -35,6 +35,41 @@ const RAX_SYSTEM_HINT = [
   'normally. But when presenting information, links, resources, or explanations to the user,',
   'take full advantage of the rich UI. The user expects a polished chat experience, not raw terminal text.',
 ].join('\n')
+
+/**
+ * Per-crew-member identity + voice-orb contract, appended to the system
+ * prompt of the five fixed dock agents (Max/Alex/Luna/Nova/Zara). Built in
+ * ControlPlane._dispatch (which knows the tabId → agent mapping) and passed
+ * down via RunOptions.appendSystemPrompt.
+ *
+ * Two jobs:
+ *  1. SENDER AWARENESS — work can arrive two ways: dispatched by the user's
+ *     realtime VOICE assistant (the Rax orb) or typed directly by the user.
+ *     Orb dispatches are mechanically wrapped in <orb_dispatch> tags at the
+ *     RPC layer (see wrapOrbDispatch in orb-rpc.ts), so the agent can tell
+ *     them apart with certainty instead of guessing from tone.
+ *  2. VOICE-FRIENDLY REPLIES — when the work came from the orb, the agent's
+ *     final message gets relayed to the user BY VOICE (either returned to
+ *     the orb via rax_send_to_tab_and_wait or spoken as an <agent_updates>
+ *     recap). A reply that leads with paths/code makes a terrible recap, so
+ *     the contract asks for a spoken-English headline first, details below.
+ */
+export function buildCrewAgentHint(name: string, tagline: string): string {
+  return [
+    '',
+    `YOUR IDENTITY: you are ${name} — "${tagline}" — one of the five Rax crew agents (Max the heavy lifter, Alex the architect, Luna the researcher, Nova the spark, Zara the closer) shown in the dock on the user's screen. The user also has a realtime VOICE assistant, the Rax orb, which conducts the crew: the user speaks to the orb, and the orb dispatches work to you and reports your results back — often out loud.`,
+    '',
+    'WHO IS TALKING TO YOU:',
+    '  - A message wrapped in <orb_dispatch> tags came from the VOICE ORB on the user\'s behalf — the user spoke, the orb briefed you. Inside you may find a <crew_handoff> block (the user\'s verbatim words are the source of truth over the orb\'s rewrite) and a "Project directory:" line telling you which project the work belongs to.',
+    '  - Any message WITHOUT <orb_dispatch> tags was typed by the user directly into your chat window. Talk to them normally — full markdown, as much detail as helps.',
+    '',
+    'REPLYING TO AN ORB DISPATCH — your final message will be relayed to the user by voice as a short recap, so shape it for speech:',
+    '  - Open with 1-2 plain spoken-English sentences stating the outcome ("Done — the build passes again; the culprit was a stale import."). No file paths, URLs, code, or markdown syntax in those opening sentences.',
+    '  - Put the full details — paths, diffs, commands, caveats — BELOW that headline for the user to read in the dock.',
+    '  - If you are blocked or need a decision, say so in the headline in one sentence the orb can speak.',
+    '  - You are talking to the USER, not the orb — the orb is just the messenger. Never address the orb.',
+  ].join('\n')
+}
 
 // Appended ONLY when the computer-use MCP is wired in. Tells Claude that
 // rax_screenshot / rax_control_screen exist, that they act on the user's
@@ -185,6 +220,9 @@ export class RunManager extends EventEmitter {
     if (options.sessionId) {
       args.push('--resume', options.sessionId)
     }
+    // $0-balance backstop — swaps a paid model for the free Rax Default when
+    // the Rax proxy is active with no credits (see claude-instance.ts).
+    options.model = applyBalanceGate(options.model)
     if (options.model && !options.model.startsWith('kimi-')) {
       args.push('--model', options.model)
     }
@@ -261,10 +299,14 @@ export class RunManager extends EventEmitter {
     }
     // Always tell Claude it's inside RAX (additive, doesn't replace base prompt).
     // When the computer-use MCP is wired in, also teach Claude that those tools
-    // exist and how to use them safely.
-    const appendedPrompt = computerUseEnabled
+    // exist and how to use them safely. Crew tabs additionally get their
+    // identity + voice-orb contract via options.appendSystemPrompt.
+    let appendedPrompt = computerUseEnabled
       ? `${RAX_SYSTEM_HINT}\n${COMPUTER_USE_HINT}`
       : RAX_SYSTEM_HINT
+    if (options.appendSystemPrompt) {
+      appendedPrompt += `\n${options.appendSystemPrompt}`
+    }
     args.push('--append-system-prompt', appendedPrompt)
 
     const { command, args: spawnArgs, instance } = buildClaudeSpawnInvocation(args)

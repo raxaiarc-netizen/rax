@@ -277,6 +277,26 @@ export default function App() {
   const isRunning = activeTabStatus === 'running' || activeTabStatus === 'connecting'
   const isOrbTabActive = useSessionStore((s) => !!s.tabs.find((t) => t.id === s.activeTabId)?.isOrbTab)
 
+  // ─── First-install tour cue (relayed from the orb tour via main) ───
+  // The orb's walkthrough asks the pill to spotlight a real element and waits
+  // until the user actually does the thing. We pulse the target and report the
+  // gesture back: 'tabbar' resolves when the pill expands, 'voicetab' when the
+  // pinned Voice tab becomes active. Already-satisfied state reports instantly.
+  const [tourCue, setTourCue] = React.useState<'tabbar' | 'voicetab' | null>(null)
+  useEffect(() => window.rax.onTourCue(({ target }) => setTourCue(target)), [])
+  useEffect(() => {
+    if (tourCue === 'tabbar' && isExpanded) {
+      window.rax.tourPillAction('tabbar')
+      setTourCue(null)
+    }
+  }, [tourCue, isExpanded])
+  useEffect(() => {
+    if (tourCue === 'voicetab' && isOrbTabActive) {
+      window.rax.tourPillAction('voicetab')
+      setTourCue(null)
+    }
+  }, [tourCue, isOrbTabActive])
+
   // Layout dimensions — expandedUI widens and heightens the panel
   const contentWidth = expandedUI ? 700 : spacing.contentWidth
   const cardExpandedWidth = expandedUI ? 700 : 460
@@ -378,7 +398,7 @@ export default function App() {
           >
             {/* Tab strip — always mounted */}
             <div className="no-drag">
-              <TabStrip />
+              <TabStrip tourCue={tourCue} tourExpanded={isExpanded} />
             </div>
 
             {/* Body — chat history only; the marketplace is a separate overlay above */}

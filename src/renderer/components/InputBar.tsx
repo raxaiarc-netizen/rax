@@ -249,10 +249,13 @@ export function InputBar() {
         const current = preferredModel || model || 'default'
         const lines = selectableModels.map((m) => {
           const active = m.id === current || (!preferredModel && m.id === model)
-          return `  ${active ? '\u25CF' : '\u25CB'} ${m.label} (${m.id})`
+          return `  ${active ? '\u25CF' : '\u25CB'} ${m.label} (${m.id})${m.locked ? ' \u2014 \u{1F512} locked' : ''}`
         })
         const header = 'Rax'
-        addSystemMessage(`${header}\n\n${lines.join('\n')}\n\nSwitch model: type /model <name>\n  e.g. /model sonnet`)
+        const lockNote = selectableModels.some((m) => m.locked)
+          ? '\n\nYour Rax balance is $0 \u2014 only Rax Default is available. Top up in Settings to unlock the other models.'
+          : ''
+        addSystemMessage(`${header}\n\n${lines.join('\n')}${lockNote}\n\nSwitch model: type /model <name>\n  e.g. /model sonnet`)
         break
       }
       case '/effort': {
@@ -353,10 +356,14 @@ export function InputBar() {
     const modelMatch = prompt.match(/^\/model\s+(\S+)/i)
     if (modelMatch) {
       const query = modelMatch[1].toLowerCase()
-      const match = selectableModels.find((m: { id: string; label: string }) =>
+      const match = selectableModels.find((m) =>
         m.id.toLowerCase().includes(query) || m.label.toLowerCase().includes(query)
       )
-      if (match) {
+      if (match && match.locked) {
+        setInput('')
+        setSlashFilter(null)
+        addSystemMessage(`${match.label} is locked — your Rax balance is $0. Top up in Settings to unlock it; until then only Rax Default is available.`)
+      } else if (match) {
         setPreferredModel(match.id)
         setInput('')
         setSlashFilter(null)

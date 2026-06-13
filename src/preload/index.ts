@@ -146,11 +146,21 @@ export interface RaxAPI {
   closeWelcome(): Promise<void>
   launchPill(): Promise<void>
 
+  // ─── First-install tour (chat-pill side) ───
+  /** Main relays the orb tour's highlight cue: pulse the named element and
+   *  watch for the user's gesture. null clears. */
+  onTourCue(callback: (payload: { target: 'tabbar' | 'voicetab' | null }) => void): () => void
+  /** Report that the gated action was performed (pill expanded / Voice tab
+   *  selected) so the orb tour advances. */
+  tourPillAction(target: 'tabbar' | 'voicetab'): void
+
   // ─── Auto-updater ───
-  /** Force an update check now. `userInitiated:true` surfaces failures and
-   *  "up to date" as native dialogs (Settings button behaviour); silent
-   *  background checks should pass false. Resolves to the final snapshot. */
+  /** Force an update check now. `userInitiated:true` opens the Software
+   *  Update window when an update is found; background checks pass false and
+   *  stay silent. Resolves to the final snapshot. */
   checkForUpdates(opts?: { userInitiated?: boolean }): Promise<UpdaterStatus>
+  /** Open (or focus) the standalone Software Update window. */
+  openUpdateWindow(): Promise<void>
   /** Start downloading the currently-available update. No-op if `phase`
    *  isn't `available`. The renderer typically calls this only when the
    *  user has answered the in-app prompt. */
@@ -355,8 +365,18 @@ const api: RaxAPI = {
   closeWelcome: () => ipcRenderer.invoke(IPC.WELCOME_CLOSE),
   launchPill: () => ipcRenderer.invoke(IPC.LAUNCH_PILL),
 
+  // ─── First-install tour (chat-pill side) ───
+  onTourCue: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, payload: { target: 'tabbar' | 'voicetab' | null }) =>
+      callback(payload)
+    ipcRenderer.on(IPC.TOUR_PILL_CUE, handler)
+    return () => ipcRenderer.removeListener(IPC.TOUR_PILL_CUE, handler)
+  },
+  tourPillAction: (target) => ipcRenderer.send(IPC.TOUR_PILL_DONE, { target }),
+
   // ─── Auto-updater ───
   checkForUpdates: (opts) => ipcRenderer.invoke(IPC.UPDATER_CHECK, opts ?? {}),
+  openUpdateWindow: () => ipcRenderer.invoke(IPC.UPDATER_OPEN_WINDOW),
   downloadUpdate: () => ipcRenderer.invoke(IPC.UPDATER_DOWNLOAD),
   installUpdate: () => ipcRenderer.send(IPC.UPDATER_INSTALL),
   getUpdaterStatus: () => ipcRenderer.invoke(IPC.UPDATER_GET_STATUS),

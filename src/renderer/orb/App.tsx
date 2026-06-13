@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Notch, type TtsEnvelopeFrames } from './Notch'
 import { NotchSettings } from './NotchSettings'
+import { OnboardingTour, type TourApi, type TourSpotlight } from './Onboarding'
+import { RealtimeVoiceClient, GROK_TRANSPORT, GEMINI_TRANSPORT } from './realtime-voice'
 import { DEFAULT_KOKORO_VOICE } from '../../shared/kokoro-voices'
 import { DEFAULT_MASCOT_COLOR_ID } from '../../shared/mascot-colors'
 import {
@@ -320,6 +322,149 @@ export default function App() {
     })
   }, [])
 
+  // ─── Intro-cameo entrance choreography ───
+  // Main pushes 'hold' before an intro-led summon (keep the seat empty —
+  // the big center-screen mascot is performing) and 'land' when the cameo
+  // merges into the bar. Cleared on dismiss so a later plain summon
+  // tumbles as usual.
+  const [introEntrance, setIntroEntrance] = useState<{
+    at: number
+    kind: 'hold' | 'land' | 'show' | 'hide'
+  } | null>(null)
+  useEffect(() => {
+    const offEntrance = window.orb.onEntrance((p) =>
+      setIntroEntrance({ at: performance.now(), kind: p.kind }),
+    )
+    const offDismiss = window.orb.onDismissed(() => setIntroEntrance(null))
+    return () => {
+      offEntrance()
+      offDismiss()
+    }
+  }, [])
+
+  // The mascot's seat (window-relative rect of the parked bar's mascot) —
+  // pushed to main so the intro cameo knows exactly where to fly, tagged
+  // with the display profile the geometry reflects (main discards seats
+  // measured for the wrong profile — parked width differs ~52px). Measured
+  // immediately on mount (initial={false} renders the bar at rest), then
+  // settle-delayed after every display-profile push so a re-summon on a
+  // different display always yields a fresh, post-spring measure. Precision
+  // past ~30px doesn't matter: touchdown happens BEHIND the opaque bar.
+  const seatMeasuredOnceRef = useRef(false)
+  useEffect(() => {
+    const measure = () => {
+      const el = document.querySelector('.notch-mascot')
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      if (r.width < 4) return
+      window.orb.pushMascotSeat({
+        x: Math.round(r.x),
+        y: Math.round(r.y),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        notched,
+      })
+    }
+    const timers: number[] = []
+    // The bar re-springs to the new parked width over ~170ms when the
+    // profile flips — measure only after it settles, or main would fly the
+    // cameo to a mid-animation x.
+    const settleMeasure = () => {
+      timers.push(window.setTimeout(measure, 380))
+    }
+    if (!seatMeasuredOnceRef.current) {
+      seatMeasuredOnceRef.current = true
+      measure()
+    }
+    settleMeasure()
+    const offProfile = window.orb.onDisplayProfile(settleMeasure)
+    window.addEventListener('resize', measure)
+    return () => {
+      timers.forEach((t) => clearTimeout(t))
+      offProfile()
+      window.removeEventListener('resize', measure)
+    }
+  }, [notched])
+
+  // ─── Realtime voice backends (Grok / Gemini) ───
+  // Main owns the truth (<userData>/grok-voice.json + gemini-voice.json —
+  // the API keys never reach this window); we mirror the public shapes for
+  // the settings panel and the activation routing. When either is `enabled`,
+  // clicking the notch opens a CONTINUOUS speech-to-speech session
+  // (server-side VAD + barge-in) instead of the record → whisper → claude →
+  // Kokoro pipeline. Default stays the local pipeline; both are pure opt-in
+  // and mutually exclusive (main flips the other off).
+  const [grokCfg, setGrokCfg] = useState<{
+    enabled: boolean
+    voice: string
+    hasKey: boolean
+    keyTail: string
+    pushToTalk?: boolean
+  }>({ enabled: false, voice: 'ara', hasKey: false, keyTail: '', pushToTalk: false })
+  const grokCfgRef = useRef(grokCfg)
+  useEffect(() => {
+    grokCfgRef.current = grokCfg
+  }, [grokCfg])
+  useEffect(() => {
+    let dead = false
+    window.orb
+      .getGrokConfig()
+      .then((cfg) => {
+        if (!dead && cfg) setGrokCfg(cfg)
+      })
+      .catch(() => {})
+    const off = window.orb.onGrokConfig((cfg) => setGrokCfg(cfg))
+    return () => {
+      dead = true
+      off()
+    }
+  }, [])
+
+  const [geminiCfg, setGeminiCfg] = useState<{
+    enabled: boolean
+    voice: string
+    hasKey: boolean
+    keyTail: string
+    screenShare?: boolean
+    pushToTalk?: boolean
+  }>({
+    enabled: false,
+    voice: 'Aoede',
+    hasKey: false,
+    keyTail: '',
+    screenShare: false,
+    pushToTalk: false,
+  })
+  const geminiCfgRef = useRef(geminiCfg)
+  useEffect(() => {
+    geminiCfgRef.current = geminiCfg
+  }, [geminiCfg])
+  useEffect(() => {
+    let dead = false
+    window.orb
+      .getGeminiConfig()
+      .then((cfg) => {
+        if (!dead && cfg) setGeminiCfg(cfg)
+      })
+      .catch(() => {})
+    const off = window.orb.onGeminiConfig((cfg) => setGeminiCfg(cfg))
+    return () => {
+      dead = true
+      off()
+    }
+  }, [])
+
+  // Live session handle. A ref (not state) drives the audio machinery; the
+  // boolean mirrors into state for the bits of UI that depend on it.
+  const rtClientRef = useRef<RealtimeVoiceClient | null>(null)
+  const [rtActive, setRtActive] = useState(false)
+  const rtActiveRef = useRef(false)
+  // ⌥R is physically down right now (realtime push-to-talk). Tracked outside
+  // the client because the key can go down BEFORE the session exists — the
+  // hold then starts a session, and startRealtimeSession re-applies the hold
+  // once the client is live (if the key is still down by then).
+  const rtHoldDownRef = useRef(false)
+
   // ─── Inline settings panel (gear on the bar) ───
   // The island's own voice-agent controls: voice, live captions, colorway.
   // Values hydrate when the panel opens — main's handlers are the on-disk
@@ -329,6 +474,9 @@ export default function App() {
   const [captionsEnabled, setCaptionsEnabled] = useState(true)
 
   const toggleSettings = useCallback((openNext: boolean) => {
+    // The tour watches settingsOpen itself: opening it on the gear step
+    // resolves that step (and finishes the tour); opening it on any other
+    // step makes the tour bow out. So nothing tour-specific is needed here.
     setSettingsOpen(openNext)
     if (openNext) {
       setCaptionsEnabled(readCaptionsEnabled())
@@ -360,6 +508,107 @@ export default function App() {
     void window.orb.setMascotColor(id).catch(() => {})
   }, [])
 
+  // Realtime settings write-through — optimistic, then reconciled with the
+  // confirmed public config (main also rebuilds the orb backend on change,
+  // and pushes the OTHER backend's config when it flips it off — the
+  // optimistic mirror below just keeps both toggles from reading "on" for
+  // the round-trip frame).
+  const handleGrokToggle = useCallback((enabled: boolean) => {
+    setGrokCfg((prev) => ({ ...prev, enabled }))
+    if (enabled) setGeminiCfg((prev) => ({ ...prev, enabled: false }))
+    void window.orb
+      .setGrokConfig({ enabled })
+      .then((res) => {
+        if (res?.config) setGrokCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleGrokVoiceChange = useCallback((voice: string) => {
+    setGrokCfg((prev) => ({ ...prev, voice }))
+    void window.orb
+      .setGrokConfig({ voice })
+      .then((res) => {
+        if (res?.config) setGrokCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleGrokKeySave = useCallback((apiKey: string) => {
+    void window.orb
+      .setGrokConfig({ apiKey })
+      .then((res) => {
+        if (res?.config) setGrokCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  // Connect-time setting (server VAD vs manual turns) — main rebuilds the
+  // backend on flip, which also ends any live session; the next activation
+  // opens in the new mode.
+  const handleGrokPttToggle = useCallback((pushToTalk: boolean) => {
+    setGrokCfg((prev) => ({ ...prev, pushToTalk }))
+    void window.orb
+      .setGrokConfig({ pushToTalk })
+      .then((res) => {
+        if (res?.config) setGrokCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleGeminiToggle = useCallback((enabled: boolean) => {
+    setGeminiCfg((prev) => ({ ...prev, enabled }))
+    if (enabled) setGrokCfg((prev) => ({ ...prev, enabled: false }))
+    void window.orb
+      .setGeminiConfig({ enabled })
+      .then((res) => {
+        if (res?.config) setGeminiCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleGeminiVoiceChange = useCallback((voice: string) => {
+    setGeminiCfg((prev) => ({ ...prev, voice }))
+    void window.orb
+      .setGeminiConfig({ voice })
+      .then((res) => {
+        if (res?.config) setGeminiCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  const handleGeminiKeySave = useCallback((apiKey: string) => {
+    void window.orb
+      .setGeminiConfig({ apiKey })
+      .then((res) => {
+        if (res?.config) setGeminiCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  // Connect-time setting, same contract as the Grok one above.
+  const handleGeminiPttToggle = useCallback((pushToTalk: boolean) => {
+    setGeminiCfg((prev) => ({ ...prev, pushToTalk }))
+    void window.orb
+      .setGeminiConfig({ pushToTalk })
+      .then((res) => {
+        if (res?.config) setGeminiCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
+  // Live toggle — the main-side session reads this per frame tick, so it
+  // takes effect mid-conversation without a reconnect.
+  const handleGeminiScreenShareToggle = useCallback((screenShare: boolean) => {
+    setGeminiCfg((prev) => ({ ...prev, screenShare }))
+    void window.orb
+      .setGeminiConfig({ screenShare })
+      .then((res) => {
+        if (res?.config) setGeminiCfg(res.config)
+      })
+      .catch(() => {})
+  }, [])
+
   // ─── Agents-dock toggle (button beside the gear) ───
   // Visibility truth lives in main and is pushed on renderer-ready plus
   // every flip — from this button, the tray menu, Rax's own rax_set_dock
@@ -380,11 +629,37 @@ export default function App() {
       .catch(() => {})
   }, [])
 
+  // ─── First-install tour ───
+  // The scripted voice walkthrough (Onboarding.tsx) that plays once, the
+  // first time the notch lands. While it runs: barge-in stands down, a notch
+  // click dismisses the performance instead of opening the mic, and every
+  // real use of the orb (⌥R, force-listen, a turn, an error, a dismissal)
+  // aborts it — the persisted step resumes it on the next boot.
+  const [tourActive, setTourActive] = useState(false)
+  const tourActiveRef = useRef(false)
+  const tourApiRef = useRef<TourApi | null>(null)
+  const [tourSpotlight, setTourSpotlight] = useState<TourSpotlight>(null)
+  // Cursor-over-notch, lifted from Notch so the tour's hover gate can await it.
+  const [notchHovered, setNotchHovered] = useState(false)
+  const handleTourActiveChange = useCallback((next: boolean) => {
+    tourActiveRef.current = next
+    setTourActive(next)
+    if (!next) setTourSpotlight(null)
+  }, [])
+
   // A turn starting (user or autonomous recap) reclaims the bar — the wave
   // and status word need the wings back.
   useEffect(() => {
     if (settingsOpen && state !== 'idle' && state !== 'error') setSettingsOpen(false)
   }, [settingsOpen, state])
+
+  // The notch window is non-focusable by default — like the hardware notch,
+  // it must never be "selected" or swallow keystrokes meant for another app.
+  // The settings panel is the one exception: its API-key inputs need real
+  // keyboard focus, so borrow focusability for exactly its lifetime.
+  useEffect(() => {
+    window.orb.setFocusable(settingsOpen)
+  }, [settingsOpen])
 
   // Loudness timeline of the utterance currently playing through afplay,
   // pushed by main at playback start. A ref, not state — the waveform reads
@@ -505,7 +780,11 @@ export default function App() {
     while (ttsInFlightCountRef.current < TTS_INFLIGHT_MAX) {
       const next = ttsQueueRef.current.shift()
       if (!next) {
-        if (turnEndedRef.current && ttsInFlightCountRef.current === 0) {
+        // While the first-install tour runs, IT owns the voice state — its
+        // lines go through ttsSpeak directly (not this queue), so the
+        // every-done drain below would wash the tour's 'talking' back to
+        // idle between lines and make the bar breathe mid-walkthrough.
+        if (turnEndedRef.current && ttsInFlightCountRef.current === 0 && !tourActiveRef.current) {
           // Natural end of a spoken turn (not a cancel — those zero the
           // armed flag first): play the soft "finished" chime exactly once.
           if (doneChimeArmedRef.current && stateRef.current === 'talking') {
@@ -589,9 +868,19 @@ export default function App() {
   // ─── Backend events ───
   useEffect(() => {
     const off = window.orb.onEvent((rawEvent) => {
+      // Realtime mode (Grok/Gemini): the session drives audio + states
+      // through its own ORB_*_EVENT channel; the normalized stream below
+      // still flows (voice tab, pill) but must not touch the Kokoro TTS
+      // pipeline — a text_chunk queued here would have the local voice talk
+      // over the realtime one, and orb_user_turn's cancel-gate could kill
+      // live realtime responses.
+      if (rtActiveRef.current) return
       const evt = rawEvent as { type: string; [k: string]: unknown }
       switch (evt.type) {
         case 'orb_user_turn': {
+          // A real turn (user or autonomous recap) takes the stage — the
+          // tour yields and resumes from its persisted step next boot.
+          if (tourActiveRef.current) tourApiRef.current?.abort()
           // Adopt the current cancel generation — chunks from any turn the
           // user killed before this one stay gated out below. For submitted
           // turns, a cancelGen that moved past the pre-submit snapshot means
@@ -661,6 +950,7 @@ export default function App() {
           break
         }
         case 'error': {
+          if (tourActiveRef.current) tourApiRef.current?.abort()
           const message = String((evt as { message?: string }).message || 'Unknown error')
           setErrorText(message)
           turnEndedRef.current = true
@@ -680,6 +970,7 @@ export default function App() {
           break
         }
         case 'orb_session_dead': {
+          if (tourActiveRef.current) tourApiRef.current?.abort()
           setErrorText('Voice agent session ended. Click the orb to retry.')
           turnEndedRef.current = true
           if (recorderRef.current && recorderRef.current.state === 'recording') {
@@ -695,6 +986,20 @@ export default function App() {
     })
 
     const offForceListen = window.orb.onForceListen(() => {
+      // Mid-tour push-to-talk is the user taking the wheel — stop the
+      // performance and honour the gesture below.
+      if (tourActiveRef.current) tourApiRef.current?.abort()
+      // Realtime mode: the hotkey opens a continuous session; once one is
+      // live the open mic + server VAD already cover "listen to me now".
+      if (
+        (grokCfgRef.current.enabled && grokCfgRef.current.hasKey) ||
+        (geminiCfgRef.current.enabled && geminiCfgRef.current.hasKey)
+      ) {
+        if (!rtActiveRef.current && (stateRef.current === 'idle' || stateRef.current === 'error')) {
+          void startRealtimeSession()
+        }
+        return
+      }
       const s = stateRef.current
       if (s === 'idle' || s === 'error') {
         void startRecording()
@@ -708,6 +1013,31 @@ export default function App() {
     })
 
     const offHoldStart = window.orb.onHoldStart(() => {
+      // The tour literally teaches ⌥R. If it's currently waiting on that very
+      // gesture, let it consume the press (advance the step) and SUPPRESS the
+      // real recording — otherwise the tour would derail into a live turn.
+      // A press during any other tour step means the user is taking over, so
+      // abort and fall through to the normal hold behavior.
+      if (tourActiveRef.current) {
+        if (tourApiRef.current?.notifyHold()) return
+        tourApiRef.current?.abort()
+      }
+      // Realtime mode. Open mic: hold-to-speak maps to "make sure a session
+      // is live" — turn boundaries belong to the server VAD. Push-to-talk:
+      // the hold edge IS the turn boundary — forward it to the live client
+      // (setHold no-ops in open-mic sessions).
+      if (
+        (grokCfgRef.current.enabled && grokCfgRef.current.hasKey) ||
+        (geminiCfgRef.current.enabled && geminiCfgRef.current.hasKey)
+      ) {
+        rtHoldDownRef.current = true
+        if (!rtActiveRef.current && (stateRef.current === 'idle' || stateRef.current === 'error')) {
+          void startRealtimeSession()
+        } else {
+          rtClientRef.current?.setHold(true)
+        }
+        return
+      }
       const s = stateRef.current
       if (s === 'idle' || s === 'error') {
         holdModeRef.current = true
@@ -733,6 +1063,14 @@ export default function App() {
     })
 
     const offHoldEnd = window.orb.onHoldEnd(() => {
+      rtHoldDownRef.current = false
+      // Realtime mode. Open mic: key release doesn't end anything — server
+      // VAD owns turns (setHold no-ops). Push-to-talk: release commits the
+      // turn and the orb answers.
+      if (rtActiveRef.current) {
+        rtClientRef.current?.setHold(false)
+        return
+      }
       if (!holdModeRef.current) return
       // stopRecording clears holdModeRef itself; finalizeRecording then
       // transcribes + submits whatever we captured.
@@ -744,6 +1082,10 @@ export default function App() {
     })
 
     const offDismiss = window.orb.onDismissed(() => {
+      // A dismissal mid-tour parks the performance (no done flag) — the
+      // persisted step resumes it on the next boot's entrance.
+      if (tourActiveRef.current) tourApiRef.current?.abort()
+      rtHoldDownRef.current = false
       // Window hidden by host — clean up everything mid-flight so we don't
       // keep recording / speaking / billing tokens. The generation bump
       // invalidates any finalizeRecording that already passed the recorder
@@ -754,6 +1096,8 @@ export default function App() {
       stopRecording(true)
       cancelAllSpeech()
       stopBargeIn()
+      // A hidden bar must never keep a live (billed) realtime session open.
+      endRealtimeSession({ quiet: true })
       // A hidden bar must not re-summon with the settings panel hanging open.
       setSettingsOpen(false)
       // If a claude turn was still streaming, stop it.
@@ -813,8 +1157,8 @@ export default function App() {
     const updateCapture = (clientX: number, clientY: number) => {
       // The error toast is interactive too (its dismiss ×) — without it in
       // the hit test the window stays click-through over the toast and the
-      // button can never be pressed.
-      const targets = document.querySelectorAll('.notch-shell, .orb-error')
+      // button can never be pressed. Same for the tour card (Skip button).
+      const targets = document.querySelectorAll('.notch-shell, .orb-error, .tour-card')
       let inside = false
       for (const el of targets) {
         const rect = el.getBoundingClientRect()
@@ -1303,14 +1647,158 @@ export default function App() {
     void startRecording({ quiet: true, handoff })
   }, [stopBargeIn, cancelAllSpeech, startRecording])
 
+  // ─── Realtime session lifecycle (Grok / Gemini) ───
+  // One continuous conversation per activation: click opens it, click again
+  // (or Esc / dismiss / idle timeout / socket loss) closes it. While active,
+  // the RealtimeVoiceClient owns mic + playback and drives the same visual
+  // states the local pipeline uses; everything Kokoro/whisper stays cold.
+  // The backend is whichever settings toggle is on (mutually exclusive).
+
+  const endRealtimeSession = useCallback((opts?: { quiet?: boolean }) => {
+    const client = rtClientRef.current
+    if (!client && !rtActiveRef.current) return
+    rtClientRef.current = null
+    client?.stop()
+    rtActiveRef.current = false
+    setRtActive(false)
+    setVizAnalyser(null)
+    setCurrentTool(null)
+    if (!opts?.quiet) playListenEnd()
+    setState((prev) => (prev === 'error' ? prev : 'idle'))
+  }, [])
+
+  const startRealtimeSession = useCallback(async () => {
+    if (rtClientRef.current) return
+    setErrorText(null)
+    // Silence any tail from the default pipeline before going live.
+    cancelAllSpeech()
+    stopBargeIn()
+    const backend = geminiCfgRef.current.enabled ? 'gemini' : 'grok'
+    const label = backend === 'gemini' ? 'Gemini' : 'Grok'
+    const keyName = backend === 'gemini' ? 'Google AI' : 'xAI'
+    const cfg = backend === 'gemini' ? geminiCfgRef.current : grokCfgRef.current
+    if (!cfg.hasKey) {
+      playError()
+      setErrorText(`${label} voice needs ${backend === 'gemini' ? 'a' : 'an'} ${keyName} API key — add one in the notch voice settings (gear).`)
+      setState('error')
+      return
+    }
+    const client = new RealtimeVoiceClient(
+      {
+        onStateChange: (s) => {
+          if (rtClientRef.current === client) setState(s)
+        },
+        onAnalyser: (a) => {
+          if (rtClientRef.current === client || a === null) setVizAnalyser(a)
+        },
+        onToolCall: (name) => {
+          if (rtClientRef.current !== client) return
+          setCurrentTool(name.replace(/^rax_/, '').replace(/_/g, ' ').toLowerCase())
+        },
+        onInterrupted: () => playBargeIn(),
+        onTurnDone: () => {
+          if (rtClientRef.current === client) playTurnDone()
+        },
+        onError: (message) => {
+          if (rtClientRef.current === client) setErrorText(message)
+        },
+        onClosed: (expected, reason) => {
+          if (rtClientRef.current !== client) return
+          rtClientRef.current = null
+          rtActiveRef.current = false
+          setRtActive(false)
+          setVizAnalyser(null)
+          setCurrentTool(null)
+          if (expected) {
+            playListenEnd()
+            setState((prev) => (prev === 'error' ? prev : 'idle'))
+          } else {
+            playError()
+            setErrorText(
+              reason && /key|auth|401|403/i.test(reason)
+                ? `${label} rejected the connection — check your ${keyName} API key in the notch settings.`
+                : `${label} voice session ended unexpectedly. Click to reconnect.`,
+            )
+            setState('error')
+          }
+        },
+      },
+      ttsEnvelopeRef,
+      backend === 'gemini' ? GEMINI_TRANSPORT : GROK_TRANSPORT,
+      { pushToTalk: cfg.pushToTalk === true },
+    )
+    rtClientRef.current = client
+    rtActiveRef.current = true
+    setRtActive(true)
+    // Instant feedback — the mic analyser animates the wave as soon as
+    // getUserMedia lands; the listen-start earcon marks "actually live".
+    setState('listening')
+    try {
+      await client.start()
+      if (rtClientRef.current !== client) return
+      playListenStart()
+      if (cfg.pushToTalk === true) {
+        if (rtHoldDownRef.current) {
+          // The hold that summoned this session is still physically down —
+          // begin the turn now that the socket is live (speech during the
+          // connect window is lost; the listen-start earcon marks "go").
+          client.setHold(true)
+        } else {
+          // Key released (or never down — click activation) — rest deaf
+          // until the next hold instead of camping in 'listening'.
+          setState('idle')
+        }
+      }
+    } catch (err) {
+      if (rtClientRef.current !== client) return
+      rtClientRef.current = null
+      rtActiveRef.current = false
+      setRtActive(false)
+      setVizAnalyser(null)
+      const message = (err as Error).message
+      if (message !== 'cancelled') {
+        playError()
+        setErrorText(message)
+        setState('error')
+      } else {
+        setState((prev) => (prev === 'error' ? prev : 'idle'))
+      }
+    }
+  }, [cancelAllSpeech, stopBargeIn])
+
+  // Realtime events (audio deltas, VAD signals, tool calls) → the live
+  // client. Routed through the ref so the subscription never re-binds. Both
+  // channels feed the same handler: only one backend ever has a live session
+  // (the toggles are exclusive), so the idle channel simply stays silent.
+  useEffect(() => {
+    const offGrok = window.orb.onGrokEvent((evt) => {
+      rtClientRef.current?.handleEvent(evt as { type: string; [k: string]: unknown })
+    })
+    const offGemini = window.orb.onGeminiEvent((evt) => {
+      rtClientRef.current?.handleEvent(evt as { type: string; [k: string]: unknown })
+    })
+    return () => {
+      offGrok()
+      offGemini()
+    }
+  }, [])
+
   // Stable boolean so the thinking → talking transition doesn't tear down
   // and rebuild the mic mid-turn (would briefly disable barge-in).
   // 'transcribing' is included as PREWARM only — getUserMedia + the audio
   // graph spin up while Whisper runs, so the detector is already live the
   // instant thinking begins (previously that spin-up left the first
   // ~100-300ms of thinking uncovered). The trigger itself stays gated to
-  // thinking/talking below.
-  const bargeInActive = state === 'talking' || state === 'thinking' || state === 'transcribing'
+  // thinking/talking below. Realtime mode opts out entirely: its mic is
+  // already open and barge-in belongs to the server VAD — a second local
+  // getUserMedia would only double the mic indicator and fight over the
+  // device.
+  // The tour opts out too: its scripted speech holds 'talking' for long
+  // stretches and room noise must not cancel the walkthrough mid-line.
+  const bargeInActive =
+    !rtActive &&
+    !tourActive &&
+    (state === 'talking' || state === 'thinking' || state === 'transcribing')
   useEffect(() => {
     if (!bargeInActive) {
       stopBargeIn()
@@ -1442,6 +1930,28 @@ export default function App() {
   // ─── Click + keyboard ───
 
   const onOrbClick = useCallback(() => {
+    // Mid-tour, a click on the bar means "okay, got it" — dismiss the
+    // performance quietly. The next click talks as usual.
+    if (tourActiveRef.current) {
+      tourApiRef.current?.abort()
+      return
+    }
+    // Realtime mode (Grok/Gemini): the notch is a session toggle — open a
+    // continuous realtime conversation, or close the one that's live.
+    // Mid-response interruption is by voice (server VAD barge-in), so every
+    // click during a session means "we're done".
+    if (grokCfgRef.current.enabled || geminiCfgRef.current.enabled) {
+      if (rtActiveRef.current) {
+        endRealtimeSession()
+      } else if (state === 'idle' || state === 'error') {
+        void startRealtimeSession()
+      } else {
+        // Busy without an active client shouldn't happen in realtime mode —
+        // degrade to a clean park.
+        endRealtimeSession()
+      }
+      return
+    }
     if (state === 'idle' || state === 'error') {
       void startRecording()
     } else if (state === 'listening') {
@@ -1466,25 +1976,26 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        // In settings mode Space belongs to the focused control (toggle,
-        // select), not push-to-talk.
-        if (settingsOpen) return
-        e.preventDefault()
-        onOrbClick()
-      } else if (e.key === 'Escape') {
+      // NOTE: no Space-to-talk here. The window is non-focusable outside the
+      // settings panel, and an accidentally-key notch turning Space into
+      // push-to-talk while the user typed elsewhere was a real failure mode.
+      // Voice is summoned by click or the global shortcuts only.
+      if (e.key === 'Escape') {
         // First Esc closes the settings panel; the next one hides the orb.
         if (settingsOpen) {
           setSettingsOpen(false)
           return
         }
         cancelAllSpeech()
-        if (state === 'listening') stopRecording(true)
-        if (state === 'thinking') void window.orb.cancelTurn()
+        endRealtimeSession({ quiet: true })
+        const rtSelected = grokCfgRef.current.enabled || geminiCfgRef.current.enabled
+        if (state === 'listening' && !rtSelected) stopRecording(true)
+        if (state === 'thinking' && !rtSelected) void window.orb.cancelTurn()
         void window.orb.hide()
       } else if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
         e.preventDefault()
         recordGenRef.current++
+        endRealtimeSession({ quiet: true })
         void window.orb.resetSession()
         cancelAllSpeech()
         setState('idle')
@@ -1499,8 +2010,15 @@ export default function App() {
     // The matching ORB_HOLD_END from main is idempotent thanks to the
     // holdModeRef guard.
     const onKeyUp = (e: KeyboardEvent) => {
-      if (!holdModeRef.current) return
       if (e.code === 'KeyR' || e.code === 'AltLeft' || e.code === 'AltRight') {
+        // Realtime push-to-talk: same missed-release safety net — the
+        // client-side setHold is idempotent with main's ORB_HOLD_END.
+        if (rtHoldDownRef.current && rtActiveRef.current) {
+          rtHoldDownRef.current = false
+          rtClientRef.current?.setHold(false)
+          return
+        }
+        if (!holdModeRef.current) return
         if (stateRef.current === 'listening') {
           stopRecording(false)
         } else {
@@ -1514,15 +2032,16 @@ export default function App() {
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [state, settingsOpen, onOrbClick, stopRecording, cancelAllSpeech])
+  }, [state, settingsOpen, stopRecording, cancelAllSpeech, endRealtimeSession])
 
   useEffect(
     () => () => {
       stopRecording(true)
       cancelAllSpeech()
       stopBargeIn()
+      endRealtimeSession({ quiet: true })
     },
-    [stopRecording, cancelAllSpeech, stopBargeIn],
+    [stopRecording, cancelAllSpeech, stopBargeIn, endRealtimeSession],
   )
 
   // ─── Live caption fed into the island's left wing ───
@@ -1543,6 +2062,20 @@ export default function App() {
         </div>
       )}
 
+      <OnboardingTour
+        entrance={introEntrance}
+        voiceState={state}
+        settingsOpen={settingsOpen}
+        rtActive={rtActive}
+        hovered={notchHovered}
+        grokHasKey={grokCfg.hasKey}
+        geminiHasKey={geminiCfg.hasKey}
+        setVoiceState={setState}
+        setSpotlight={setTourSpotlight}
+        onActiveChange={handleTourActiveChange}
+        apiRef={tourApiRef}
+      />
+
       <Notch
         state={state}
         caption={caption}
@@ -1556,6 +2089,10 @@ export default function App() {
         onSettingsToggle={toggleSettings}
         dockVisible={dockVisible}
         onDockToggle={handleDockToggle}
+        settingsRows={6 + (grokCfg.enabled ? 3 : 0) + (geminiCfg.enabled ? 4 : 0)}
+        introEntrance={introEntrance}
+        tourSpotlight={tourSpotlight}
+        onHoverChange={setNotchHovered}
         settingsPanel={
           <NotchSettings
             voiceId={voiceId}
@@ -1565,6 +2102,26 @@ export default function App() {
             onCaptionsChange={handleCaptionsChange}
             colorId={mascotColor ?? DEFAULT_MASCOT_COLOR_ID}
             onColorChange={handleColorChange}
+            grokEnabled={grokCfg.enabled}
+            grokHasKey={grokCfg.hasKey}
+            grokKeyTail={grokCfg.keyTail}
+            grokVoice={grokCfg.voice}
+            grokPushToTalk={grokCfg.pushToTalk === true}
+            onGrokToggle={handleGrokToggle}
+            onGrokVoiceChange={handleGrokVoiceChange}
+            onGrokKeySave={handleGrokKeySave}
+            onGrokPushToTalkToggle={handleGrokPttToggle}
+            geminiEnabled={geminiCfg.enabled}
+            geminiHasKey={geminiCfg.hasKey}
+            geminiKeyTail={geminiCfg.keyTail}
+            geminiVoice={geminiCfg.voice}
+            geminiScreenShare={geminiCfg.screenShare === true}
+            geminiPushToTalk={geminiCfg.pushToTalk === true}
+            onGeminiToggle={handleGeminiToggle}
+            onGeminiVoiceChange={handleGeminiVoiceChange}
+            onGeminiKeySave={handleGeminiKeySave}
+            onGeminiScreenShareToggle={handleGeminiScreenShareToggle}
+            onGeminiPushToTalkToggle={handleGeminiPttToggle}
           />
         }
       />

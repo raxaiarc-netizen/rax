@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { GearSix, SidebarSimple, X } from '@phosphor-icons/react'
 import { Mascot } from './Mascot'
@@ -39,6 +39,16 @@ export type VoiceState =
   | 'thinking'
   | 'talking'
   | 'error'
+
+/** Entrance beat for the mascot when the notch window appears. `at` is a
+ *  performance.now() stamp — each new value (re)plays its `kind`:
+ *  'tumble' = the default backflip drop-in; 'hold' = stay off-stage (the
+ *  intro cameo's big mascot is mid-flight elsewhere); 'land' = thud into
+ *  the seat now (the cameo just merged into the bar). */
+export interface MascotEntrance {
+  at: number
+  kind: 'tumble' | 'hold' | 'land'
+}
 
 type RGB = [number, number, number]
 
@@ -89,6 +99,23 @@ interface NotchProps {
    *  in the hover cluster beside the gear. */
   dockVisible?: boolean
   onDockToggle?: () => void
+  /** Control-row count in the settings panel (App knows — e.g. the Grok /
+   *  Gemini voice sections add rows when enabled). Sizes the open panel. */
+  settingsRows?: number
+  /** Entrance/exit choreography pushes relayed by App (ORB_ENTRANCE):
+   *  'hold' parks the mascot off-stage while the intro cameo plays; 'show'
+   *  is the bar-cue (main just made the window visible — start the bar
+   *  entrance); 'land' releases him into his seat; 'hide' is a dismissal
+   *  (contract into the notch before the window hides). null = plain
+   *  summons (tumble). */
+  introEntrance?: { at: number; kind: 'hold' | 'land' | 'show' | 'hide' } | null
+  /** First-install tour highlight. 'gear' pins the bar open with the hover
+   *  cluster showing and a pulse on the settings gear ("tap the gear");
+   *  'hover' leaves the bar PARKED but glowing, inviting the user to hover
+   *  (so the hover itself is the gesture the tour waits on). */
+  tourSpotlight?: 'gear' | 'hover' | null
+  /** Lift hover state up to App so the tour's hover gate can await it. */
+  onHoverChange?: (hovered: boolean) => void
 }
 
 // Geometry per display kind. On notched MacBooks the bar's center is dead
@@ -109,9 +136,12 @@ const GEOMETRY = {
 } as const
 
 // Settings-mode bar height: 38px header strip (which keeps clearing the
-// hardware cutout) + three 34px control rows + padding. The hardware notch
-// is only ~32-37px tall, so everything below the header is clear glass.
-const SETTINGS_HEIGHT = 152
+// hardware cutout) + 38px per control row (34px row + spacing share). The
+// hardware notch is only ~32-37px tall, so everything below the header is
+// clear glass. Row count comes from App (the Grok/Gemini sections add rows
+// when enabled), defaulting to the classic three.
+const SETTINGS_ROW_HEIGHT = 38
+const settingsHeightFor = (rows: number): number => 38 + rows * SETTINGS_ROW_HEIGHT
 
 // Collapse lag so micro state flips don't shiver the bar.
 const COLLAPSE_DELAY_MS = 420
@@ -143,7 +173,12 @@ export function Notch({
   settingsPanel,
   dockVisible = true,
   onDockToggle,
+  settingsRows = 3,
+  introEntrance = null,
+  tourSpotlight = null,
+  onHoverChange,
 }: NotchProps) {
+  const settingsHeight = settingsHeightFor(settingsRows)
   const [hovered, setHovered] = useState(false)
   const [open, setOpen] = useState(false)
   const openRef = useRef(false)
@@ -165,20 +200,129 @@ export function Notch({
 
   const active = state !== 'idle' && !(state === 'error' && errorParked)
 
+  // Only the gear spotlight pins the bar open; the hover invite deliberately
+  // leaves it parked so the user's hover is a real, visible expand.
+  const tourPin = tourSpotlight === 'gear'
+
   useEffect(() => {
     openRef.current = open
   }, [open])
+
+  // Lift hover up to App (drives the tour's hover gate). Effect — not inline
+  // in the handlers — so it also covers the visibility-driven reset below.
+  useEffect(() => {
+    onHoverChange?.(hovered)
+  }, [hovered, onHoverChange])
+
+  // Entrance choreography — the bar expands out of the notch (center-out
+  // clip reveal) and the mascot arrives after it. The window stays mounted
+  // across ⇧⌘O hides, so "the notch appeared" is the visibility flip
+  // (hidden → visible) or the intro's explicit 'show' push, plus the very
+  // first mount when the window is already showing. Which mascot beat plays
+  // depends on whether the intro cameo is running: a 'hold' push parks the
+  // seat empty (the big center-screen mascot is mid-flight); its 'land'
+  // push thuds him in. Plain summons tumble.
+  const [entering, setEntering] = useState(false)
+  const [entrance, setEntrance] = useState<MascotEntrance | null>(null)
+  const introArmedRef = useRef(false)
+  // While a cameo holds the seat — or after a dismissal contraction — the
+  // bar parks at the entrance's collapsed pose (center-clipped, see
+  // .pre-entrance) so a window surfacing ahead of its 'show' cue, or the
+  // stale buffer frame the compositor re-presents on the next show, never
+  // flashes a full-width bar.
+  const [preHold, setPreHold] = useState(false)
+  // Dismissal contraction in flight (.exiting drives the notch-exit clip).
+  const [exiting, setExiting] = useState(false)
+  // Touchdown sympathy: the mascot's entrance impact nudges the whole bar
+  // down a couple px — the landing CAUSES something, which is what makes it
+  // read as weight instead of decoration. Cleared by its own animationend.
+  const [thudding, setThudding] = useState(false)
+
+  const enter = useCallback(() => {
+    setPreHold(false)
+    setExiting(false)
+    setEntering(true)
+    setEntrance({
+      at: performance.now(),
+      kind: introArmedRef.current ? 'hold' : 'tumble',
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!introEntrance) return
+    if (introEntrance.kind === 'hold') {
+      // Arm the next show AND re-park immediately: a first-load window that
+      // was painted while hidden reports document 'visible', so the
+      // mount-time enter() below may already have tumbled him into the seat
+      // before this push arrived. The cameo's big mascot is mid-show — the
+      // seat must read empty whenever the window truly appears.
+      introArmedRef.current = true
+      setPreHold(true)
+      setEntrance({ at: introEntrance.at, kind: 'hold' })
+    } else if (introEntrance.kind === 'show') {
+      // Bar-cue: main just made the window visible. The visibility flip
+      // below usually fires enter() too (harmless double — the entrance
+      // restarts ms apart), but on a painted-hidden first-load window that
+      // flip never comes; this push is the authoritative cue.
+      enter()
+    } else if (introEntrance.kind === 'hide') {
+      // Dismissal contraction — shrink back into the notch BEFORE main
+      // hides the window (240ms later), so the window's last painted
+      // frame (which the compositor re-presents on the next show) is the
+      // collapsed pose the next entrance starts from. Without this every
+      // re-summon flashed the stale full-width bar, then collapsed and
+      // re-expanded — "expands twice".
+      setOpen(false)
+      setHovered(false)
+      setEntering(false)
+      setExiting(true)
+      setPreHold(true)
+    } else {
+      introArmedRef.current = false
+      setPreHold(false)
+      setExiting(false)
+      setEntrance({ at: performance.now(), kind: 'land' })
+    }
+  }, [introEntrance, enter])
+
+  // Failsafe: a 'hold' whose 'land' never arrives must not leave an empty
+  // bar forever. Generous — the hold is armed at summon time, seconds before
+  // the cameo even cues the bar, and main converts every cameo death into a
+  // 'land' push (its own watchdog caps the performance at 16s); this only
+  // catches a fully wedged main-side flow.
+  useEffect(() => {
+    if (entrance?.kind !== 'hold') return
+    const t = window.setTimeout(() => {
+      setPreHold(false)
+      setEntrance({ at: performance.now(), kind: 'land' })
+    }, 20_000)
+    return () => clearTimeout(t)
+  }, [entrance])
 
   // Hiding the window never delivers the button's mouseleave — without this
   // a bar dismissed mid-hover re-summons stuck open with the invite showing
   // until the cursor happens to travel through the top strip again.
   useEffect(() => {
+    if (document.visibilityState === 'visible') enter()
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden') setHovered(false)
+      if (document.visibilityState === 'hidden') {
+        setHovered(false)
+        // Kill a half-played entrance so the next summon restarts it
+        // cleanly; drop any stale intro arming with it. preHold STAYS true
+        // while hidden: whatever frame the buffer holds, the next show must
+        // start from the collapsed pose until its 'show' cue lands.
+        setEntering(false)
+        setExiting(false)
+        setEntrance(null)
+        setPreHold(true)
+        introArmedRef.current = false
+      } else {
+        enter()
+      }
     }
     document.addEventListener('visibilitychange', onVisibility)
     return () => document.removeEventListener('visibilitychange', onVisibility)
-  }, [])
+  }, [enter])
 
   // Open/close choreography:
   //   · state-driven opens are instant
@@ -197,14 +341,16 @@ export function Notch({
         collapseTimer.current = null
       }
     }
-    if (active || hovered || settingsOpen) {
+    if (active || hovered || settingsOpen || tourPin) {
       // Any open intent cancels a pending collapse immediately — the bar
       // must never blink shut between hover-out and hover-back-in.
       clearCollapse()
-      if (active || settingsOpen) {
+      if (active || settingsOpen || tourPin) {
         // Settings mode pins the bar open without the hover-intent dwell —
         // mousing away mid-fiddle (e.g. into a native select popup) must
-        // never collapse the panel under the user.
+        // never collapse the panel under the user. The tour's gear
+        // spotlight pins it the same way: the bar is mid-demonstration.
+        // (The 'hover' spotlight is deliberately NOT pinned — see tourPin.)
         clearHover()
         setOpen(true)
       } else if (!openRef.current && !hoverTimer.current) {
@@ -224,7 +370,7 @@ export function Notch({
       clearHover()
       clearCollapse()
     }
-  }, [active, hovered, settingsOpen])
+  }, [active, hovered, settingsOpen, tourPin])
 
   const geo = notched ? GEOMETRY.notched : GEOMETRY.plain
 
@@ -255,7 +401,9 @@ export function Notch({
               ? 'Tap to retry'
               : ''
             : !active && open
-              ? 'Tap to talk'
+              ? tourSpotlight === 'gear'
+                ? 'Tap the gear'
+                : 'Tap to talk'
               : ''
   // Wave shows whenever the orb is actively engaged — live during audio,
   // resting ripple during transcribe/think so the wing never reads as dead.
@@ -279,8 +427,10 @@ export function Notch({
   const stoppable = hovered && active && state !== 'error' && !settingsOpen
   // Gear lives in the left wing whenever it's free (no wave) and the cursor
   // is around — the "other side" of the mascot. In settings mode it morphs
-  // into the close ✕ with the panel title beside it.
-  const showGear = !settingsOpen && hovered && !active && !!onSettingsToggle
+  // into the close ✕ with the panel title beside it. The tour's spotlight
+  // forces it visible (with a pulse) while the voice says "tap the gear".
+  const showGear =
+    !settingsOpen && (hovered || tourSpotlight === 'gear') && !active && !!onSettingsToggle
   const ariaLabel = settingsOpen
     ? 'Rax voice settings'
     : state === 'talking' || state === 'thinking'
@@ -294,15 +444,40 @@ export function Notch({
             : 'Rax voice — tap to talk'
 
   return (
-    <div className="notch-root">
+    <div
+      className={`notch-root${entering ? ' entering' : ''}${exiting ? ' exiting' : ''}${preHold && !entering ? ' pre-entrance' : ''}`}
+      // Entrance collapsed pose = the hardware-notch width, so the
+      // center-out reveal starts exactly where the cutout ends and every
+      // animated pixel is visible (see notch-entrance in styles.css).
+      style={{ '--entrance-inset': `${((1 - geo.clearance / geo.parkedWidth) * 50).toFixed(2)}%` } as CSSProperties}
+      onAnimationEnd={(e) => {
+        // Covers both notch-entrance and the reduced-motion fade variant.
+        if (e.animationName.startsWith('notch-entrance')) setEntering(false)
+        // Exit settled — .pre-entrance (set alongside) holds the same
+        // collapsed pose statically from here.
+        if (e.animationName === 'notch-exit') setExiting(false)
+      }}
+    >
+      {/* Impact wrapper — its only job is the touchdown dip. A separate
+          element so the dip COMPOSES with the root's entrance slide (skip-
+          intro can land while the bar is still sliding) instead of the two
+          animations fighting over one transform. */}
+      <div
+        className={`notch-impact${thudding ? ' thud' : ''}`}
+        onAnimationEnd={(e) => {
+          if (e.animationName === 'notch-thud') setThudding(false)
+        }}
+      >
       {/* A div-with-button-role rather than a <button>: settings mode nests
           real interactive controls (gear/✕, select, toggle, swatches) inside
-          the shell, and buttons cannot legally contain buttons. Space still
-          works via App's global keydown; Enter is handled below. */}
+          the shell, and buttons cannot legally contain buttons. The window
+          is non-focusable outside settings (overlay, not an app window), so
+          activation is click/voice only — the Enter handler below is a
+          vestigial a11y affordance for the brief focusable settings window. */}
       <motion.div
         role="button"
         tabIndex={0}
-        className={`notch-shell${open ? ' open' : ''}${settingsOpen ? ' settings' : ''}${flashing ? ' flashing' : ''}${notched ? '' : ' plain'}`}
+        className={`notch-shell${open ? ' open' : ''}${settingsOpen ? ' settings' : ''}${flashing ? ' flashing' : ''}${notched ? '' : ' plain'}${tourSpotlight === 'hover' ? ' tour-hover-invite' : ''}`}
         aria-label={ariaLabel}
         onClick={(e) => {
           // In settings mode the bar is a panel, not a talk button; clicks
@@ -319,6 +494,13 @@ export function Notch({
             onActivate()
           }
         }}
+        onFocus={(e) => {
+          // Outside settings the window is non-focusable, so any focus the
+          // shell receives is a leftover from a window key transition
+          // (settings close, hold-shortcut focus()). Drop it immediately —
+          // the notch must never sit "selected".
+          if (!settingsOpen) e.currentTarget.blur()
+        }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onAnimationEnd={(e) => {
@@ -330,7 +512,7 @@ export function Notch({
           // size for every state keeps the island calm instead of
           // re-morphing per state.
           width: settingsOpen ? geo.settingsWidth : open ? geo.openWidth : geo.parkedWidth,
-          height: settingsOpen ? SETTINGS_HEIGHT : open ? 38 : 32,
+          height: settingsOpen ? settingsHeight : open ? 38 : 32,
           borderBottomLeftRadius: settingsOpen ? 18 : open ? 12 : 10,
           borderBottomRightRadius: settingsOpen ? 18 : open ? 12 : 10,
         }}
@@ -405,7 +587,7 @@ export function Notch({
                 >
                   <button
                     type="button"
-                    className="notch-gear"
+                    className={`notch-gear${tourSpotlight === 'gear' ? ' spotlit' : ''}`}
                     aria-label="Voice agent settings"
                     onClick={(e) => {
                       e.stopPropagation()
@@ -463,6 +645,10 @@ export function Notch({
               analyser={hearing ? (analyser ?? null) : null}
               envelopeRef={ttsEnvelope ?? null}
               colorId={mascotColor}
+              entrance={entrance}
+              onEntranceImpact={() => {
+                if (!reducedMotion) setThudding(true)
+              }}
             />
           </div>
         </motion.div>
@@ -478,7 +664,7 @@ export function Notch({
             <motion.div
               key="settings-panel"
               className="notch-settings"
-              style={{ top: 38, height: SETTINGS_HEIGHT - 38 }}
+              style={{ top: 38, height: settingsHeight - 38 }}
               initial={{ opacity: 0, y: -6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4, transition: { duration: 0.12, ease: 'easeIn' } }}
@@ -489,6 +675,7 @@ export function Notch({
           ) : null}
         </AnimatePresence>
       </motion.div>
+      </div>
     </div>
   )
 }

@@ -1,0 +1,118 @@
+/* Intro cameo window — full-display, transparent, click-through. The big
+   mascot performs center-screen, then leaps into the notch. Everything
+   here is decoration around the Mascot component; motion is driven
+   imperatively from main.tsx's one rAF. */
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+.intro-stage {
+  position: fixed;
+  inset: 0;
+}
+
+/* Positioned via transform each frame: translate(cx-SIZE/2, cy-SIZE/2)
+   scale(s·squash). Origin centered so the shrink during the leap reads as
+   the robot receding, not sliding toward a corner. */
+.intro-mascot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+}
+
+/* Grounding shadow — a floating robot still wants weight. Fades out with
+   the leap (driven inline). */
+.intro-mascot svg {
+  filter: drop-shadow(0 22px 26px rgba(0, 0, 0, 0.4));
+}
+
+/* Afterimage ghosts — frozen clones of the mascot replaying the dash/leap
+   transform a few frames late (driven from the rAF). Blur + low opacity
+   reads as motion, not as extra robots. */
+.intro-ghost {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+.intro-ghost svg {
+  filter: blur(1.4px);
+}
+
+/* Taunt bubble — "click on me!" etc. The anchor is transform-positioned
+   from the rAF each frame (riding above the mascot wherever he zips);
+   hidden until the first frame places it so it can't flash at 0,0. The
+   inner pill re-pops on every text change via its keyed remount. */
+.intro-bubble-anchor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  will-change: transform;
+  pointer-events: none;
+}
+.intro-bubble {
+  font-family: ui-rounded, 'SF Pro Rounded', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: rgba(255, 255, 255, 0.95);
+  background: rgba(14, 14, 22, 0.86);
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 8px 14px;
+  white-space: nowrap;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  animation: intro-bubble-pop 0.26s cubic-bezier(0.3, 1.4, 0.5, 1) both;
+}
+@keyframes intro-bubble-pop {
+  0% {
+    transform: scale(0.7) translateY(6px);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+  }
+}
+/* Leaving (wind-up swallows the taunt): pop back out instead of vanishing. */
+.intro-bubble.out {
+  animation: intro-bubble-out 0.16s ease-in both;
+}
+@keyframes intro-bubble-out {
+  to {
+    transform: scale(0.75) translateY(5px);
+    opacity: 0;
+  }
+}
+
+/* Radar ping — an expanding ring fired while he scans the desktop. The
+   border color is set inline from the visor colorway. */
+.intro-ping {
+  position: absolute;
+  border-radius: 50%;
+  border: 2px solid rgba(100, 210, 255, 0.8);
+  pointer-events: none;
+  animation: intro-ping 1.1s cubic-bezier(0.2, 0.6, 0.4, 1) both;
+}
+@keyframes intro-ping {
+  0% {
+    transform: scale(0.22);
+    opacity: 0.75;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}

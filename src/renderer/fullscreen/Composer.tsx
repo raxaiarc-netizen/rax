@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   ArrowUp, Microphone, Paperclip, Camera, X, Check, SpinnerGap, Code,
-  Plus, HandPalm, CaretDown, CaretRight, FolderOpen, ShieldCheck, LockOpen,
+  Plus, HandPalm, CaretDown, CaretRight, FolderOpen, ShieldCheck, LockOpen, LockSimple,
 } from '@phosphor-icons/react'
 import type { Icon } from '@phosphor-icons/react'
 import { useShallow } from 'zustand/react/shallow'
@@ -412,11 +412,15 @@ export function Composer({ floating = false, onCodeModeToggle }: {
                     type="button"
                     role="menuitemradio"
                     aria-checked={modelId === m.id}
+                    aria-disabled={m.locked || undefined}
+                    disabled={m.locked}
+                    title={m.locked ? 'Top up Rax credits to unlock' : undefined}
                     className={`fs-codex-menu-item${modelId === m.id ? ' is-active' : ''}`}
-                    onClick={() => { setPreferredModel(m.id); setOpenMenu(null) }}
+                    style={m.locked ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
+                    onClick={() => { if (m.locked) return; setPreferredModel(m.id); setOpenMenu(null) }}
                   >
                     <span className="fs-codex-menu-label">{getModelDisplayLabel(m.id)}</span>
-                    {modelId === m.id && <Check size={13} weight="bold" />}
+                    {m.locked ? <LockSimple size={13} /> : modelId === m.id && <Check size={13} weight="bold" />}
                   </button>
                 ))}
                 <div className="fs-codex-menu-heading">Effort</div>

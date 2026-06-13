@@ -1,13 +1,29 @@
-/* Welcome window — own BrowserWindow, normal Mac chrome. */
+/* Welcome window — own BrowserWindow, normal Mac chrome.
+   Visual language mirrors rax-ai.com: flat white paper, ink text, hairline
+   borders, pill navy CTAs, Caveat script accents, Fragment Mono details. */
+
 .rax-welcome-window {
+  --ink: #0c0c0c;
+  --muted: #51566a;
+  --faint: #9aa0b4;
+  --line: rgba(12, 18, 40, 0.08);
+  --line-2: rgba(12, 18, 40, 0.14);
+  --line-3: rgba(12, 18, 40, 0.22);
+  --surface-2: #f6f8fc;
+  --navy: #1a2f8a;
+  --coral: #eb6a6a;
+  --green: #2cc475;
+  --font-script: 'Caveat', cursive;
+  --font-mono: 'Fragment Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
   width: 100vw;
   height: 100vh;
   display: flex;
   flex-direction: column;
   background:
-    radial-gradient(1100px 600px at 50% -20%, color-mix(in srgb, var(--fs-accent, #a78bfa) 18%, transparent), transparent 60%),
-    #0c0c0e;
-  color: #f5f5f5;
+    radial-gradient(820px 420px at 50% -12%, #f3f6fc, transparent 60%),
+    #ffffff;
+  color: var(--ink);
 }
 
 /* Drag region aligned with the macOS traffic lights. */
@@ -22,33 +38,39 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 14px 56px 28px;
+  justify-content: center;
+  padding: 0 56px 38px;
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
 
+/* Script eyebrow — the site's handwritten-note accent. */
 .rax-welcome-eyebrow {
-  font-size: 11px;
+  font-family: var(--font-script);
+  font-size: 21px;
   font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--fs-accent, #a78bfa);
-  margin-bottom: 8px;
+  line-height: 1;
+  color: var(--coral);
+  margin-bottom: 10px;
 }
+
 .rax-welcome-title {
   font-size: 28px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   line-height: 1.15;
-  color: #f5f5f5;
+  color: var(--ink);
 }
+
 .rax-welcome-sub {
   margin-top: 12px;
   font-size: 14px;
-  line-height: 1.55;
-  color: #a3a3a3;
+  line-height: 1.6;
+  color: var(--muted);
   max-width: 560px;
 }
+
+/* ── Step 2 choice cards ────────────────────────────────────────────── */
 
 .rax-welcome-choices {
   display: grid;
@@ -56,8 +78,79 @@
   gap: 14px;
   margin-top: 28px;
 }
-@media (max-width: 720px) {
+@media (max-width: 640px) {
   .rax-welcome-choices { grid-template-columns: 1fr; }
+}
+
+.rax-choice {
+  font: inherit;
+  text-align: left;
+  padding: 20px 20px 18px;
+  border-radius: 18px;
+  background: #ffffff;
+  border: 1px solid var(--line-2);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.rax-choice:hover:not(:disabled) {
+  border-color: var(--line-3);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px -12px rgba(12, 18, 40, 0.18);
+}
+.rax-choice:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.rax-choice.is-recommended {
+  border-color: color-mix(in srgb, var(--navy) 30%, transparent);
+}
+.rax-choice.is-recommended:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--navy) 48%, transparent);
+  box-shadow: 0 14px 36px -18px rgba(26, 47, 138, 0.35);
+}
+
+.rax-choice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.rax-choice-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.rax-choice-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--navy);
+  background: color-mix(in srgb, var(--navy) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--navy) 22%, transparent);
+  border-radius: 999px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.rax-choice-blurb {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.rax-choice-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  padding-top: 6px;
+}
+.rax-choice-cta.is-primary {
+  color: var(--navy);
 }
 
 .rax-welcome-footer {
@@ -67,16 +160,14 @@
   justify-content: center;
 }
 
-/* The choice-card styles live in rax-welcome.css (imported by main.tsx)
-   so we share them with the in-pill version if it's ever resurrected. */
-
 /* ── In-flight login progress ───────────────────────────────────────── */
+
 .rax-welcome-progress {
   margin-top: 28px;
   padding: 22px 20px 18px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -87,8 +178,8 @@
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.10);
-  border-top-color: var(--fs-accent, #a78bfa);
+  border: 2px solid var(--line-2);
+  border-top-color: var(--navy);
   animation: rax-welcome-spin 0.9s linear infinite;
 }
 @keyframes rax-welcome-spin {
@@ -97,7 +188,7 @@
 
 .rax-welcome-progress-text {
   font-size: 13.5px;
-  color: #d4d4d4;
+  color: var(--muted);
 }
 
 .rax-welcome-log {
@@ -106,11 +197,11 @@
   overflow: auto;
   margin: 0;
   padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  color: #a3a3a3;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -122,26 +213,42 @@
   gap: 8px;
 }
 
-/* Primary CTA used in step 1 (single-button screen). */
+.rax-welcome-skip {
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+.rax-welcome-skip:hover:not(:disabled) { color: var(--ink); }
+.rax-welcome-skip:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Primary CTA ────────────────────────────────────────────────────── */
+
 .rax-welcome-primary-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 11px 22px;
+  padding: 12px 26px;
+  font: inherit;
   font-size: 14px;
   font-weight: 600;
-  color: #fff;
-  background: var(--fs-accent, #a78bfa);
-  border: 1px solid color-mix(in srgb, var(--fs-accent, #a78bfa) 75%, transparent);
-  border-radius: 10px;
+  color: #ffffff;
+  background: var(--navy);
+  border: 1px solid var(--navy);
+  border-radius: 999px;
   cursor: pointer;
-  transition: transform 80ms ease, background 120ms ease;
+  transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
 }
 .rax-welcome-primary-button:hover {
-  background: color-mix(in srgb, var(--fs-accent, #a78bfa) 85%, white 15%);
+  transform: translateY(-2px);
+  box-shadow: 0 14px 36px -18px rgba(26, 47, 138, 0.6);
 }
 .rax-welcome-primary-button:active {
-  transform: translateY(1px);
+  transform: translateY(0);
+  box-shadow: none;
 }
 .rax-welcome-primary-button:disabled {
   opacity: 0.55;
@@ -151,23 +258,25 @@
 .rax-welcome-fineprint {
   margin-top: 14px;
   font-size: 12px;
-  color: #777;
+  color: var(--faint);
 }
 
-/* Step 3 — success / launch screen. */
+/* ── Step 3 — success / launch screen ───────────────────────────────── */
+
 .rax-welcome-success-eyebrow {
-  color: #34d399 !important; /* emerald-400 instead of accent — signals success */
+  color: var(--green) !important;
 }
 
 .rax-welcome-success-summary {
   margin-top: 22px;
   padding: 14px 16px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   gap: 6px;
+  max-width: 420px;
 }
 .rax-welcome-summary-row {
   display: flex;
@@ -177,11 +286,11 @@
   font-size: 13px;
 }
 .rax-welcome-summary-label {
-  color: #888;
+  color: var(--faint);
   letter-spacing: 0.02em;
 }
 .rax-welcome-summary-value {
-  color: #e5e5e5;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
 }
@@ -189,10 +298,21 @@
 .rax-kbd {
   display: inline-block;
   padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-2);
+  font-family: var(--font-mono);
   font-size: 11px;
-  color: #d4d4d4;
+  color: var(--ink);
+}
+
+.rax-welcome-error {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--coral) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--coral) 28%, transparent);
+  color: #b54848;
+  font-size: 12.5px;
+  white-space: pre-wrap;
 }

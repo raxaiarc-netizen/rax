@@ -1,0 +1,425 @@
+/* Software Update window — own BrowserWindow, welcome-style chrome.
+   Visual language mirrors rax-ai.com: flat white paper, ink text, hairline
+   borders, pill navy CTAs, Caveat script accents, Fragment Mono details. */
+
+.rax-update-window {
+  --ink: #0c0c0c;
+  --muted: #51566a;
+  --faint: #9aa0b4;
+  --line: rgba(12, 18, 40, 0.08);
+  --line-2: rgba(12, 18, 40, 0.14);
+  --line-3: rgba(12, 18, 40, 0.22);
+  --surface-2: #f6f8fc;
+  --navy: #1a2f8a;
+  --coral: #eb6a6a;
+  --green: #2cc475;
+  --purple: #b48cff;
+  --font-script: 'Caveat', cursive;
+  --font-mono: 'Fragment Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Consumed by the inline conic-gradient on the download progress ring. */
+  --upd-ring: var(--navy);
+  --upd-ring-track: #e9edf5;
+
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(820px 420px at 50% -12%, #f3f6fc, transparent 60%),
+    #ffffff;
+  color: var(--ink);
+  user-select: none;
+  overflow: hidden;
+}
+
+/* Drag region aligned with the macOS traffic lights. */
+.upd-titlebar {
+  height: 38px;
+  flex: none;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.upd-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 8px 44px 22px;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  min-height: 0;
+}
+
+/* ── Hero orb ───────────────────────────────────────────────────────── */
+
+.upd-orb-wrap {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  margin: 10px auto 24px;
+  flex: none;
+}
+
+/* Phases without a notes panel have little content — nudge it toward the
+   vertical center so the window doesn't feel top-heavy. */
+.rax-update-window:not(.phase-available) .upd-orb-wrap {
+  margin-top: 56px;
+}
+
+.upd-orb {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.9), transparent 40%),
+    radial-gradient(circle at 60% 70%, color-mix(in srgb, var(--purple) 80%, #fff), var(--purple) 72%);
+  box-shadow: 0 18px 40px -16px color-mix(in srgb, var(--purple) 75%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: upd-orb-float 4.5s ease-in-out infinite alternate;
+}
+
+@keyframes upd-orb-float {
+  from { transform: translateY(-2px); }
+  to   { transform: translateY(3px); }
+}
+
+/* Spinner ring while checking. */
+.upd-orb-spinner-ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--navy);
+  animation: upd-spin 0.9s linear infinite;
+}
+
+@keyframes upd-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Conic progress ring while downloading (fill driven inline from React). */
+.upd-orb-progress-ring {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
+  transition: background 0.25s linear;
+}
+
+.upd-orb-check {
+  width: 40px;
+  height: 40px;
+  color: #ffffff;
+  animation: upd-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes upd-pop {
+  0%   { transform: scale(0.3); opacity: 0; }
+  70%  { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); }
+}
+
+.upd-orb-mark {
+  font-size: 34px;
+  font-weight: 700;
+  color: #ffffff;
+  animation: upd-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.phase-error .upd-orb,
+.phase-unsupported .upd-orb {
+  background:
+    radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.9), transparent 40%),
+    radial-gradient(circle at 60% 70%, color-mix(in srgb, var(--coral) 80%, #fff), var(--coral) 72%);
+  box-shadow: 0 18px 40px -16px color-mix(in srgb, var(--coral) 75%, transparent);
+}
+
+.phase-downloaded .upd-orb,
+.phase-not-available .upd-orb {
+  background:
+    radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.9), transparent 40%),
+    radial-gradient(circle at 60% 70%, color-mix(in srgb, var(--green) 80%, #fff), var(--green) 72%);
+  box-shadow: 0 18px 40px -16px color-mix(in srgb, var(--green) 75%, transparent);
+}
+
+/* ── Copy ───────────────────────────────────────────────────────────── */
+
+/* Script eyebrow — the site's handwritten-note accent. */
+.upd-eyebrow {
+  font-family: var(--font-script);
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--coral);
+  margin-bottom: 10px;
+}
+
+.phase-downloaded .upd-eyebrow,
+.phase-not-available .upd-eyebrow {
+  color: var(--green);
+}
+
+.upd-title {
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.18;
+  color: var(--ink);
+  margin: 0;
+}
+
+.upd-sub {
+  margin: 12px 0 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 400px;
+}
+
+.upd-sub-dim {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* ── Version chips ──────────────────────────────────────────────────── */
+
+.upd-version-chips {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.upd-chip {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+}
+
+.upd-chip-new {
+  background: color-mix(in srgb, var(--navy) 7%, transparent);
+  border-color: color-mix(in srgb, var(--navy) 28%, transparent);
+  color: var(--navy);
+}
+
+.upd-chip-arrow {
+  color: var(--faint);
+  font-size: 13px;
+}
+
+/* ── Release notes ──────────────────────────────────────────────────── */
+
+.upd-notes {
+  width: 100%;
+  max-height: 168px;
+  overflow-y: auto;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  text-align: left;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #3a3f52;
+  user-select: text;
+}
+
+.upd-notes h1, .upd-notes h2, .upd-notes h3, .upd-notes h4 {
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  margin: 10px 0 4px;
+}
+
+.upd-notes h1:first-child, .upd-notes h2:first-child,
+.upd-notes h3:first-child, .upd-notes p:first-child,
+.upd-notes ul:first-child {
+  margin-top: 0;
+}
+
+.upd-notes p { margin: 6px 0; }
+
+/* Tailwind preflight (via index.css) resets list styles — restore them. */
+.upd-notes ul {
+  list-style: disc;
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.upd-notes ol {
+  list-style: decimal;
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.upd-notes li { margin: 3px 0; }
+
+.upd-notes code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+}
+
+.upd-notes a {
+  color: var(--navy);
+  text-decoration: none;
+}
+
+.upd-notes a:hover { text-decoration: underline; }
+
+.upd-link {
+  margin-top: 10px;
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--navy);
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.upd-link:hover { opacity: 1; text-decoration: underline; }
+
+/* ── Download progress ──────────────────────────────────────────────── */
+
+.upd-progress {
+  width: 100%;
+  max-width: 380px;
+  margin-top: 22px;
+}
+
+.upd-progress-track {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--upd-ring-track);
+  overflow: hidden;
+}
+
+.upd-progress-fill {
+  position: relative;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--navy), #3362ff);
+  transition: width 0.25s ease;
+  min-width: 6px;
+}
+
+/* Soft shimmer sweeping the filled part so slow downloads still feel alive. */
+.upd-progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+  background-size: 200% 100%;
+  animation: upd-shimmer 1.6s linear infinite;
+}
+
+@keyframes upd-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+.upd-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 9px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Errors ─────────────────────────────────────────────────────────── */
+
+.upd-error-detail {
+  width: 100%;
+  max-height: 76px;
+  overflow: auto;
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* ── Actions ────────────────────────────────────────────────────────── */
+
+.upd-actions {
+  margin-top: auto;
+  padding-top: 18px;
+  display: flex;
+  gap: 10px;
+  flex: none;
+}
+
+.upd-btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 24px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+}
+
+.upd-btn:active { transform: translateY(0); box-shadow: none; }
+
+.upd-btn-primary {
+  background: var(--navy);
+  border: 1px solid var(--navy);
+  color: #ffffff;
+}
+
+.upd-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 36px -18px rgba(26, 47, 138, 0.6);
+}
+
+.upd-btn-ghost {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+}
+
+.upd-btn-ghost:hover { background: var(--surface-2); }
+
+.upd-footnote {
+  flex: none;
+  margin-top: 12px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .upd-orb,
+  .upd-orb-check,
+  .upd-orb-mark,
+  .upd-progress-fill::after {
+    animation: none;
+  }
+}

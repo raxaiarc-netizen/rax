@@ -32,12 +32,12 @@ const RAW: Record<string, ModelPricing> = {
     cacheWritePerMTok:   1.25,
     cacheReadPerMTok:    0.10,
   },
-  // Moonshot Kimi K2.6 — billed via /v1/messages → Moonshot's
+  // Moonshot Kimi K2.7-code — billed via /v1/messages → Moonshot's
   // Anthropic-compatible endpoint. Cache-miss input = $0.95/Mtok, cache hit
   // = $0.16/Mtok, output = $4.00/Mtok. Moonshot doesn't quote a separate
   // cache-write price (caching is automatic), so we charge cache writes at
   // the cache-miss input rate — the same tokens you'd pay for anyway.
-  'kimi-k2.6': {
+  'kimi-k2.7-code': {
     inputPerMTok:        0.95,
     outputPerMTok:       4.00,
     cacheWritePerMTok:   0.95,

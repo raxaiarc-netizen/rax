@@ -22,6 +22,7 @@ import { EventEmitter } from 'events'
 import { getCliEnv } from '../cli-env'
 import { log as _log } from '../logger'
 import * as raxAuth from '../auth/rax'
+import { RAX_DEFAULT_MODEL_ID } from '../../shared/types'
 
 function log(msg: string): void {
   _log('ClaudeInstance', msg)
@@ -311,6 +312,27 @@ export function onModeChange(cb: (instance: ClaudeInstance) => void): () => void
 // ─── Spawn helpers ────────────────────────────────────────────────────────
 
 /**
+ * $0-balance backstop — the renderer pickers already lock paid models and
+ * force "Rax Default" at a confirmed zero balance, but a stale persisted
+ * selection (or any path that skips the picker) could still reach a spawn
+ * with a paid model id. The Rax proxy would 402 it mid-chat, so swap the
+ * model for the free kimi tier here as the last line of defense.
+ *
+ * Fails OPEN: an unknown balance (never fetched, signed out) never rewrites
+ * the model. Only applies when the spawn actually rides the Rax proxy
+ * (bundled instance + active Rax cloud key).
+ */
+export function applyBalanceGate(model: string | undefined): string | undefined {
+  if (!raxAuth.isActive()) return model
+  if (getActiveInstance().mode !== 'bundled') return model
+  const balance = raxAuth.getCachedBalanceCents()
+  if (typeof balance !== 'number' || balance > 0) return model
+  if ((model || '').startsWith('kimi-')) return model
+  log(`Balance gate: $0 Rax balance — overriding model '${model ?? 'default'}' → '${RAX_DEFAULT_MODEL_ID}'`)
+  return RAX_DEFAULT_MODEL_ID
+}
+
+/**
  * Build an env block that points the spawned claude at the active instance's
  * config dir, plus the usual login-shell PATH augmentation.
  *
@@ -347,8 +369,8 @@ export function buildClaudeEnv(extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   // For kimi-* the CLI's --model flag is skipped (its validator rejects
   // non-Anthropic ids), so without this the CLI sends its built-in default
   // (e.g. claude-opus-4-8) to the Rax proxy, which 400s. Pin the model via
-  // env so the CLI emits kimi-k2.6 to whatever base URL is active — the Rax
-  // cloud proxy then forwards kimi-* upstream to Moonshot. No local key
+  // env so the CLI emits the requested kimi-* id to whatever base URL is
+  // active — the Rax cloud proxy then forwards kimi-* upstream to Moonshot. No local key
   // needed; only the model NAME is set here (creds come from Rax cloud).
   // Only the bundled "Rax's Claude" rides the Rax proxy — pinning kimi-* in
   // system mode would send a Moonshot id to Anthropic with the user's own

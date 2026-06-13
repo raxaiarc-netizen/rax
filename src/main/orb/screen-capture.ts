@@ -44,7 +44,7 @@ export interface CaptureCalibration {
 
 export interface CaptureResult {
   base64: string
-  mimeType: 'image/png'
+  mimeType: 'image/png' | 'image/jpeg'
   bytes: number
   display: number | 'main'
   cursorMarker: boolean
@@ -80,6 +80,14 @@ export interface CaptureOptions {
    * (JPEG artifacts on small UI text hurt the model's click accuracy).
    */
   maxEdge?: number
+  /**
+   * Output encoding. 'png' (default) for tool screenshots the model reads
+   * fine detail from; 'jpg' for continuous streams (Gemini screen share)
+   * where a ~10× smaller payload per frame matters more than text crispness.
+   * Only honoured when the annotation pipeline runs — the raw-source
+   * fallback is whatever `screencapture` produced (PNG).
+   */
+  format?: 'png' | 'jpg'
 }
 
 interface CursorAnnotation {
@@ -122,6 +130,7 @@ interface CursorAnnotation {
  *   RAX_SHOT_DISPLAY  — 1-based display index (0 = main)
  *   RAX_SHOT_MAX      — max-edge px clamp (string, default "1600"; "0" disables)
  *   RAX_SHOT_ANNOTATE — "1" to draw ring/dot, anything else skips
+ *   RAX_SHOT_FORMAT   — "jpg" for JPEG output (quality 0.72), anything else PNG
  */
 const CURSOR_ANNOTATE_JXA = [
   "ObjC.import('AppKit');",
@@ -215,8 +224,12 @@ const CURSOR_ANNOTATE_JXA = [
   '  out.unlockFocus;',
   '  var tiff = out.TIFFRepresentation;',
   '  var rep2 = $.NSBitmapImageRep.imageRepWithData(tiff);',
-  '  var pngData = rep2.representationUsingTypeProperties(4, $());',
-  '  pngData.writeToFileAtomically(dst, true);',
+  "  var wantJpg = (ObjC.unwrap(env.objectForKey('RAX_SHOT_FORMAT')) || 'png') === 'jpg';",
+  // NSBitmapImageFileType: 3 = JPEG, 4 = PNG.
+  '  var outData = wantJpg',
+  "    ? rep2.representationUsingTypeProperties(3, $.NSDictionary.dictionaryWithObjectForKey($(0.72), $('NSImageCompressionFactor')))",
+  '    : rep2.representationUsingTypeProperties(4, $());',
+  '  outData.writeToFileAtomically(dst, true);',
   '  return JSON.stringify({',
   '    cursor_pt: [Math.floor(cx_pt), Math.floor(cy_top_pt)],',
   '    cursor_px: [Math.floor(mx_src), Math.floor(my_top_src)],',
@@ -331,8 +344,9 @@ export async function captureScreenForOrb(
   }
   // display === 0 → 'main' (let screencapture pick primary).
 
+  const format: 'png' | 'jpg' = opts.format === 'jpg' ? 'jpg' : 'png'
   const tmpPath = join(tmpdir(), `rax-orb-shot-${randomBytes(6).toString('hex')}.png`)
-  const dstPath = join(tmpdir(), `rax-orb-shot-${randomBytes(6).toString('hex')}-final.png`)
+  const dstPath = join(tmpdir(), `rax-orb-shot-${randomBytes(6).toString('hex')}-final.${format}`)
   const captureArgs = ['-x']
   if (display > 0) captureArgs.push('-D', String(display))
   captureArgs.push(tmpPath)
@@ -383,6 +397,7 @@ export async function captureScreenForOrb(
           RAX_SHOT_DISPLAY: String(display),
           RAX_SHOT_MAX: String(tryMax),
           RAX_SHOT_ANNOTATE: annotate ? '1' : '0',
+          RAX_SHOT_FORMAT: format,
         },
       )
       const lastLine = out.trim().split('\n').pop() || '{}'
@@ -423,7 +438,9 @@ export async function captureScreenForOrb(
 
   const result: CaptureResult = {
     base64,
-    mimeType: 'image/png',
+    // JPEG only comes out of the annotation pipeline (dstPath); when that
+    // failed we fell back to the raw screencapture output, which is PNG.
+    mimeType: format === 'jpg' && outputPath === dstPath ? 'image/jpeg' : 'image/png',
     bytes,
     display: display || 'main',
     cursorMarker: !!(cursorMeta && cursorMeta.marked),

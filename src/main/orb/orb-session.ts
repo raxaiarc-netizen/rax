@@ -10,7 +10,7 @@ import { randomBytes } from 'crypto'
 import mcpServerSrc from './mcp-server.cjs?raw'
 import { StreamParser } from '../stream-parser'
 import { normalize } from '../claude/event-normalizer'
-import { buildClaudeEnv, buildClaudeSpawnInvocation } from '../claude/claude-instance'
+import { applyBalanceGate, buildClaudeEnv, buildClaudeSpawnInvocation } from '../claude/claude-instance'
 import { log as _log } from '../logger'
 import type { ClaudeEvent, NormalizedEvent } from '../../shared/types'
 import type { OrbRpcInfo } from './orb-rpc'
@@ -423,6 +423,9 @@ export class OrbSession extends EventEmitter {
       '--mcp-config', this.mcpConfigPath,
       '--append-system-prompt', ORB_SYSTEM_PROMPT,
     ]
+    // $0-balance backstop — swaps a paid model for the free Rax Default when
+    // the Rax proxy is active with no credits (see claude-instance.ts).
+    this.opts.model = applyBalanceGate(this.opts.model)
     if (this.opts.model && !this.opts.model.startsWith('kimi-')) {
       args.push('--model', this.opts.model)
     }

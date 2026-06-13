@@ -39,6 +39,17 @@ let state: PersistedState = { enabled: false, key: null }
 let loaded = false
 const events = new EventEmitter()
 
+// Last balance seen by fetchAccount — feeds the spawn-time $0 backstop in
+// claude-instance.ts. The renderers poll fetchAccount over IPC (boot, focus,
+// after runs, every 60s while locked), which keeps this fresh as a side
+// effect. null = never fetched / signed out → the backstop fails open.
+let lastKnownBalanceCents: number | null = null
+
+/** Most recent balance reported by /api/me, in cents. null = unknown. */
+export function getCachedBalanceCents(): number | null {
+  return lastKnownBalanceCents
+}
+
 function storePath(): string {
   return join(app.getPath('userData'), 'rax-cloud.json')
 }
@@ -106,6 +117,7 @@ export async function signOut(): Promise<void> {
   await load()
   state.key = null
   state.enabled = false
+  lastKnownBalanceCents = null
   await persist()
 }
 
@@ -142,9 +154,11 @@ export async function fetchAccount(): Promise<{
       }
     }
     const j = (await res.json()) as { email?: string; balance_cents?: number }
+    const balanceCents = typeof j.balance_cents === 'number' ? j.balance_cents : null
+    if (balanceCents !== null) lastKnownBalanceCents = balanceCents
     return {
       email: j.email ?? null,
-      balanceCents: typeof j.balance_cents === 'number' ? j.balance_cents : null,
+      balanceCents,
       fetchedAt: new Date().toISOString(),
       error: null,
     }

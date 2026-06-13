@@ -41,6 +41,137 @@ body {
   justify-content: center;
 }
 
+/* Entrance — the island GROWS OUT of the notch: a center-out reveal
+   (clip-path inset from both sides). The collapsed pose is EXACTLY the
+   hardware-notch width (--entrance-inset, set per display profile by
+   Notch.tsx: (1 − clearance/parkedWidth) × 50%), so every animated pixel
+   is visible — starting narrower would hide the fast first half of the
+   motion behind the black cutout and the reveal would read as a laggy
+   pop. Easing is the SAME critically-damped spring the shell's framer
+   hover-open uses (ζ≈1 ω=24 — x(t)=1−(1+ωt)e^(−ωt), sampled into
+   linear() at 20ms steps): springs start from zero velocity, so the
+   expansion eases in then glides to rest instead of slamming out like an
+   expo curve; no overshoot, because a clip clamps at fully-open and the
+   overshoot portion would read as a stall. clip-path rather than scaleX
+   so the wings/mascot reveal at full size instead of smearing. The -8px
+   top inset keeps .notch-impact's seam-guard strip (top: -6px) inside
+   the clip when a thud overlaps the entrance. The mascot's dive rides on
+   top (Mascot.tsx sequences itself off the same entranceAt clock: bar
+   first, backflip second, and his touchdown dips the bar via
+   .notch-impact below). */
+.notch-root.entering {
+  animation: notch-entrance 0.4s both;
+  animation-timing-function: linear(
+    0, 0.084, 0.25, 0.422, 0.572, 0.692, 0.782, 0.849, 0.896, 0.929,
+    0.952, 0.968, 0.979, 0.986, 0.991, 0.994, 0.996, 0.997, 0.998, 0.999, 1
+  );
+}
+@keyframes notch-entrance {
+  from {
+    clip-path: inset(-8px var(--entrance-inset, 38%) 0 var(--entrance-inset, 38%) round 0 0 10px 10px);
+  }
+  to {
+    clip-path: inset(-8px 0 0 0 round 0 0 10px 10px);
+  }
+}
+/* While an intro cameo holds the seat — or any time the window is hidden /
+   freshly dismissed — the bar parks at the entrance's collapsed pose: main
+   can surface the window a beat before the renderer's 'show' cue arrives
+   over IPC, and the compositor re-presents the window's last painted frame
+   on every show, so that resting frame must read as "the notch, not yet
+   expanded", never a flash of the full-width bar. */
+.notch-root.pre-entrance {
+  clip-path: inset(-8px var(--entrance-inset, 38%) 0 var(--entrance-inset, 38%) round 0 0 10px 10px);
+}
+/* Dismissal — the island contracts back INTO the notch: the entrance
+   mirrored (same critically-damped spring easing, from/to swapped), so the
+   collapse moves fast through the open width and settles gently at the
+   cutout edge instead of slamming shut. Main hides the window once it
+   settles (ORB_EXIT_MS in index.ts must outlast this duration). Beyond the
+   polish this guarantees the last painted frame is the collapsed pose the
+   next entrance starts from. The from-pose insets are negative (past the
+   box) rather than 0 so the open bar's drop shadow isn't clipped on the
+   very first frame. .pre-entrance (set together with it) holds the final
+   pose after the animation ends and while the window is hidden. */
+.notch-root.exiting {
+  animation: notch-exit 0.34s both;
+  animation-timing-function: linear(
+    0, 0.084, 0.25, 0.422, 0.572, 0.692, 0.782, 0.849, 0.896, 0.929,
+    0.952, 0.968, 0.979, 0.986, 0.991, 0.994, 0.996, 0.997, 0.998, 0.999, 1
+  );
+}
+@keyframes notch-exit {
+  from {
+    clip-path: inset(-8px -28px -28px -28px round 0 0 10px 10px);
+  }
+  to {
+    clip-path: inset(-8px var(--entrance-inset, 38%) 0 var(--entrance-inset, 38%) round 0 0 10px 10px);
+  }
+}
+
+/* Touchdown sympathy — the mascot's landing hammers the bar down a couple
+   px and it springs back. Lives on its own wrapper so it composes with the
+   entrance slide instead of replacing it (skip-intro lands mid-slide). */
+.notch-impact {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+/* Seam guard: a black strip extending above the bar, normally clipped by
+   the window's top edge (= the screen edge, the bar sits flush). When the
+   thud — or a skip-intro slide overshoot — pushes the bar down a couple px,
+   the strip rides the same transforms and keeps the top sealed: the island
+   must never read as detached from the screen edge. */
+.notch-impact::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  background: #000;
+  pointer-events: none;
+}
+.notch-impact.thud {
+  animation: notch-thud 0.32s ease both;
+}
+@keyframes notch-thud {
+  0% {
+    transform: translateY(0);
+  }
+  26% {
+    transform: translateY(2.6px);
+  }
+  62% {
+    transform: translateY(-0.9px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notch-root.entering {
+    animation: notch-entrance-fade 0.2s ease-out both;
+  }
+  @keyframes notch-entrance-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  /* No contraction sweep — snap straight to the collapsed pose (the
+     .pre-entrance class set alongside .exiting provides it). */
+  .notch-root.exiting {
+    animation: none;
+  }
+  .notch-impact.thud {
+    animation: none;
+  }
+}
+
 .notch-shell {
   position: relative;
   /* Column: the 38px header strip (wings + clearance) stacks above the
@@ -91,11 +222,12 @@ body {
     inset 0 0 0 0.5px rgba(255, 255, 255, 0.1),
     0 5px 16px rgba(0, 0, 0, 0.38);
 }
-/* Keyboard focus (Space toggles the bar) — quiet inner ring, outline-based
-   so it stacks with whatever box-shadow the current state owns. */
+/* No focus ring, ever — the notch must read as hardware, never "selected".
+   The window is non-focusable outside settings, so a shell ring could only
+   appear as a stale-focus misfire (window key transitions re-focus the
+   shell as :focus-visible); inner settings controls keep their own rings. */
 .notch-shell:focus-visible {
-  outline: 1.5px solid rgba(255, 255, 255, 0.4);
-  outline-offset: -3px;
+  outline: none;
 }
 /* Auto-screenshot flash — sharp on, soft off, like the platform's own
    screenshot blink. A one-shot animation (not the 0.3s box-shadow
@@ -311,6 +443,45 @@ body {
   background-color: rgba(255, 255, 255, 0.14);
 }
 
+/* Read-only shortcut chip (the ⇧⌘O hide/show hint) — same glass language
+   as the select, but inert: no hover, no cursor. */
+.notch-settings-kbd {
+  background-color: rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.85);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 3px 8px;
+}
+
+/* Text input (the xAI key field) — same glass language as the select,
+   minus the chevron. Write-only: the saved key shows as a placeholder
+   tail, typing drafts a replacement committed on Enter/blur. */
+.notch-settings-input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 190px;
+  min-width: 0;
+  background-color: rgba(255, 255, 255, 0.09);
+  color: #fff;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 3px 8px;
+  outline: none;
+}
+.notch-settings-input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+.notch-settings-input:focus {
+  background-color: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
 /* Voice preview — play button beside the select; pulses while the sample
    is audible. */
 .notch-voice-control {
@@ -492,3 +663,248 @@ body {
   transition: opacity 0.15s ease;
 }
 .orb-error button:hover { opacity: 1; }
+
+/* ─── First-install tour ─── */
+/* The guidance card under the bar — same material as the island: pitch
+   black, hairline border, top edge-light, soft drop. The anchor centers it
+   without a CSS transform (framer-motion owns the card's transform). */
+.tour-anchor {
+  position: absolute;
+  top: 58px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.tour-card {
+  pointer-events: auto;
+  width: 396px;
+  max-width: calc(100vw - 48px);
+  background: #000;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  padding: 14px 16px 10px;
+  box-shadow:
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.09),
+    0 12px 32px rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
+
+/* One step's content: visual zone (icon chip or keycaps) beside the text. */
+.tour-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+}
+.tour-icon {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.09);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+}
+.tour-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tour-title {
+  font-family: ui-rounded, 'SF Pro Rounded', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: rgba(255, 255, 255, 0.95);
+  line-height: 1.35;
+}
+.tour-hint {
+  font-family: ui-rounded, 'SF Pro Rounded', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.4;
+  margin-top: 1px;
+}
+
+/* Keycap row — physical-key look: glass face, inset bottom edge so the cap
+   reads as raised, rounded label type. */
+.tour-keys {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.tour-key {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.55);
+  font-family: ui-rounded, 'SF Pro Rounded', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* Footer — progress dots left, the always-available Skip on the right. */
+.tour-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+.tour-dots {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.tour-dot {
+  width: 4.5px;
+  height: 4.5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background 0.25s ease, transform 0.25s ease;
+}
+.tour-dot.past {
+  background: rgba(255, 255, 255, 0.42);
+}
+.tour-dot.on {
+  background: #fff;
+  transform: scale(1.25);
+}
+.tour-skip {
+  background: rgba(255, 255, 255, 0.08);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.72);
+  font-family: ui-rounded, 'SF Pro Rounded', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 4px 11px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.tour-skip:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+/* Keycaps in the tour card — pulse a soft blue glow so the shortcut steps
+   read as "press these keys." The base raised-cap shadows are repeated in
+   both keyframes so the cap keeps its physical look while it breathes. */
+.tour-key {
+  animation: tour-key-pulse 1.5s ease-in-out infinite;
+}
+@keyframes tour-key-pulse {
+  0%, 100% {
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.22),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.55),
+      0 0 0 rgba(99, 179, 255, 0);
+  }
+  50% {
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.22),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.55),
+      0 0 12px rgba(99, 179, 255, 0.6);
+  }
+}
+
+/* The little pulsing mic chip on the right of a gated step — a quiet "I'm
+   waiting for you to do this" marker. */
+.tour-await {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(99, 179, 255, 0.95);
+  background: rgba(99, 179, 255, 0.12);
+  animation: tour-await-pulse 1.4s ease-in-out infinite;
+}
+@keyframes tour-await-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(99, 179, 255, 0.45); }
+  70% { box-shadow: 0 0 0 7px rgba(99, 179, 255, 0); }
+}
+
+/* Hover-invite — while the tour waits for the user to hover, the parked bar
+   glows blue (drawing the eye up to the notch) without expanding, so the
+   hover itself stays a real, visible action. */
+.notch-shell.tour-hover-invite {
+  animation: notch-hover-invite 1.5s ease-in-out infinite;
+}
+@keyframes notch-hover-invite {
+  0%, 100% {
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.09),
+      0 0 0 rgba(99, 179, 255, 0);
+  }
+  50% {
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.12),
+      0 3px 18px rgba(99, 179, 255, 0.55);
+  }
+}
+
+/* Gear spotlight — the tour's "tap the gear" beat: lit chip + a radiating
+   pulse ring so the eye lands on it without any pointer present. */
+.notch-gear.spotlit {
+  background: rgba(255, 255, 255, 0.24);
+  color: #fff;
+  animation: gear-spotlight 1.4s ease-out infinite;
+}
+@keyframes gear-spotlight {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(255, 255, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Steady lit states instead of pulses — the highlights stay legible
+     without the radiating motion. */
+  .notch-gear.spotlit {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28);
+  }
+  .tour-key {
+    animation: none;
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.22),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.55),
+      0 0 10px rgba(99, 179, 255, 0.45);
+  }
+  .tour-await {
+    animation: none;
+    box-shadow: 0 0 0 2.5px rgba(99, 179, 255, 0.3);
+  }
+  .notch-shell.tour-hover-invite {
+    animation: none;
+    box-shadow:
+      inset 0 0.5px 0 rgba(255, 255, 255, 0.12),
+      0 2px 14px rgba(99, 179, 255, 0.5);
+  }
+}

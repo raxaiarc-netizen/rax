@@ -44,7 +44,16 @@ function StatusDot({ status, hasUnread, hasPermission, orb, accent }: { status: 
   )
 }
 
-export function TabStrip() {
+export function TabStrip({
+  tourCue = null,
+  tourExpanded = false,
+}: {
+  /** First-install tour highlight: 'tabbar' pulses the whole strip ("press
+   *  to expand"); 'voicetab' pulses the pinned Voice tab ("open me"). */
+  tourCue?: 'tabbar' | 'voicetab' | null
+  /** Pill already expanded — suppress the tab-bar pulse (nothing to do). */
+  tourExpanded?: boolean
+} = {}) {
   // Subscribe to the raw tabs array (stable reference; only changes when the
   // tab set actually changes) and filter in render. Filtering inside the
   // selector would build a fresh array each call and trip the
@@ -60,10 +69,11 @@ export function TabStrip() {
   const closeTab = useSessionStore((s) => s.closeTab)
   const colors = useColors()
 
+  const pulseBar = tourCue === 'tabbar' && !tourExpanded
   return (
     <div
       data-rax-ui
-      className="flex items-center no-drag"
+      className={`flex items-center no-drag${pulseBar ? ' tour-pulse-bar' : ''}`}
       style={{ padding: '8px 0' }}
     >
       <div className="relative min-w-0 flex-1">
@@ -112,7 +122,7 @@ export function TabStrip() {
                   exit={{ opacity: 0, scale: 0.9 }}
                   transition={{ duration: 0.15 }}
                   onClick={() => selectTab(tab.id)}
-                  className="group flex items-center gap-1.5 cursor-pointer select-none flex-shrink-0 max-w-[160px] transition-all duration-150"
+                  className={`group flex items-center gap-1.5 cursor-pointer select-none flex-shrink-0 max-w-[160px] transition-all duration-150${orb && tourCue === 'voicetab' && !isActive ? ' tour-pulse-target' : ''}`}
                   style={{
                     background: isActive ? activeBg : 'transparent',
                     border: isActive ? `1px solid ${activeBorder}` : '1px solid transparent',

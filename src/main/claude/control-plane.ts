@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
-import { RunManager } from './run-manager'
+import { RunManager, buildCrewAgentHint } from './run-manager'
 import { PtyRunManager } from './pty-run-manager'
+import { getAgent } from '../../shared/agents'
 import { PermissionServer, maskSensitiveFields } from '../hooks/permission-server'
 import type { HookToolRequest, PermissionOption } from '../hooks/permission-server'
 import { log as _log } from '../logger'
@@ -678,6 +679,17 @@ export class ControlPlane extends EventEmitter {
     // --permission-mode flag. Bypass uses bypassPermissions natively (no hook
     // dependency); ask/auto stay on default and route through the hook server.
     options = { ...options, permissionMode: this.permissionMode }
+
+    // Crew tabs (agent-max … agent-zara) get their identity + voice-orb
+    // contract appended to the system prompt: who they are, how to tell an
+    // orb dispatch (<orb_dispatch>) from a directly-typed user message, and
+    // how to shape replies the orb will relay by voice.
+    if (!options.appendSystemPrompt) {
+      const agent = getAgent(tabId)
+      if (agent) {
+        options = { ...options, appendSystemPrompt: buildCrewAgentHint(agent.name, agent.tagline) }
+      }
+    }
 
     // If the server is down (e.g. transient port collision, dev hot-reload
     // that called stop() and left it stopped), try to bring it back before

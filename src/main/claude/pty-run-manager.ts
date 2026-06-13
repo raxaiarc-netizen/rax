@@ -20,7 +20,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { appendFileSync, chmodSync, existsSync, statSync } from 'fs'
 import type { NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
-import { buildClaudeEnv, buildClaudeSpawnInvocation } from './claude-instance'
+import { applyBalanceGate, buildClaudeEnv, buildClaudeSpawnInvocation } from './claude-instance'
 
 // node-pty is a native module — require at runtime to avoid Vite bundling issues
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -322,6 +322,9 @@ export class PtyRunManager extends EventEmitter {
     if (options.sessionId) {
       args.push('--resume', options.sessionId)
     }
+    // $0-balance backstop — swaps a paid model for the free Rax Default when
+    // the Rax proxy is active with no credits (see claude-instance.ts).
+    options.model = applyBalanceGate(options.model)
     if (options.model && !options.model.startsWith('kimi-')) {
       args.push('--model', options.model)
     }
@@ -337,6 +340,11 @@ export class PtyRunManager extends EventEmitter {
     }
     if (options.systemPrompt) {
       args.push('--system-prompt', options.systemPrompt)
+    }
+    // Crew identity + voice-orb contract (parity with RunManager; the PTY
+    // transport skips RAX_SYSTEM_HINT because it renders in a raw terminal).
+    if (options.appendSystemPrompt) {
+      args.push('--append-system-prompt', options.appendSystemPrompt)
     }
 
     // Pass prompt as positional argument

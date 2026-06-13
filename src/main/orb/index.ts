@@ -3,21 +3,31 @@ import { TabContextRegistry } from './tab-context'
 import { OrbRpcServer, type OrbRpcInfo } from './orb-rpc'
 import { OrbSession, type SubmitAttachment, type AgentCompletion } from './orb-session'
 import { OrbDirectSession } from './orb-direct-session'
+import { GrokVoiceSession, type GrokRendererEvent } from './grok-voice-session'
+import { getGrokVoiceConfig } from './grok-voice-config'
+import { GeminiVoiceSession, type GeminiRendererEvent } from './gemini-voice-session'
+import { getGeminiVoiceConfig } from './gemini-voice-config'
 import { isAgentId, getAgent } from '../../shared/agents'
 
 /**
- * The orb has two backends:
+ * The orb has four backends:
  *   - CLI mode: spawn `claude -p --input-format stream-json` (the original).
  *   - Direct mode: call Anthropic's API straight from main with an in-process
  *     tool loop. Much faster TTFA, no Node cold-start, no MCP boot.
+ *   - Grok voice mode: xAI's realtime speech-to-speech agent over WebSocket —
+ *     replaces whisper + the turn loop + Kokoro in one hop. Opt-in from the
+ *     notch settings (grok-voice-config.ts); requires the user's xAI key.
+ *   - Gemini voice mode: Google's Live API, same realtime shape as Grok
+ *     behind its own opt-in toggle (gemini-voice-config.ts; the two realtime
+ *     toggles are mutually exclusive). Requires the user's Google AI key.
  *
- * Direct mode is the new default for the orb only (tabs/pill/fullscreen are
- * untouched). Set `RAX_ORB_BACKEND=cli` to fall back. The two implementations
+ * Direct mode is the default for the orb only (tabs/pill/fullscreen are
+ * untouched). Set `RAX_ORB_BACKEND=cli` to fall back. All implementations
  * intentionally expose the same surface (submitTurn / cancelTurn / warmup /
  * resetConversation / isAlive / isBusy / shutdown + 'event', 'turn-end',
  * 'session-dead' emitters) so this file is the only branch point.
  */
-type OrbBackend = OrbSession | OrbDirectSession
+type OrbBackend = OrbSession | OrbDirectSession | GrokVoiceSession | GeminiVoiceSession
 const ORB_BACKEND: 'direct' | 'cli' =
   (process.env.RAX_ORB_BACKEND || 'direct').toLowerCase() === 'cli' ? 'cli' : 'direct'
 import type { ControlPlane } from '../claude/control-plane'
@@ -206,12 +216,40 @@ export class OrbController extends EventEmitter {
   }
 
   private _createSession(rpcInfo: Awaited<ReturnType<OrbRpcServer['start']>>): OrbBackend {
+    // Realtime voice (user opt-in from the notch settings) replaces the
+    // entire local pipeline with a speech-to-speech agent — Grok or Gemini,
+    // whichever toggle is on (the settings layer keeps them exclusive; Grok
+    // wins deterministically if a stale config file ever has both). Falls
+    // through to the default backend when a toggle is on but no key is
+    // stored yet, so the orb never goes dead while the user is mid-setup.
+    const grokCfg = getGrokVoiceConfig()
+    const geminiCfg = getGeminiVoiceConfig()
+    const useGrok = grokCfg.enabled && grokCfg.apiKey.length > 0
+    const useGemini = !useGrok && geminiCfg.enabled && geminiCfg.apiKey.length > 0
     // Direct mode talks straight to Anthropic — no CLI subprocess, no MCP
     // boot, prompt caching on the system prompt + tool schema. CLI mode is
     // kept as a fallback under RAX_ORB_BACKEND=cli so we can flip back in a
     // pinch without a rebuild.
-    log(`Creating orb session [backend=${ORB_BACKEND}]`)
-    const session: OrbBackend = ORB_BACKEND === 'direct'
+    log(`Creating orb session [backend=${useGrok ? 'grok-voice' : useGemini ? 'gemini-voice' : ORB_BACKEND}]`)
+    const session: OrbBackend = useGrok
+      ? new GrokVoiceSession({
+          rpc: rpcInfo,
+          projectPath: this.deps.getProjectPath(),
+          tabContext: this.tabContext,
+          model: this.lastRequestedModel ?? undefined,
+        })
+      : useGemini
+      ? new GeminiVoiceSession({
+          rpc: rpcInfo,
+          projectPath: this.deps.getProjectPath(),
+          tabContext: this.tabContext,
+          model: this.lastRequestedModel ?? undefined,
+          // Screen-share frames register their geometry with the RPC server
+          // so unit:"norm1000" clicks resolve against the frame the model is
+          // actually looking at.
+          onFrameCalibration: (cal) => this.rpc.setStreamCalibration(cal),
+        })
+      : ORB_BACKEND === 'direct'
       ? new OrbDirectSession({
           rpc: rpcInfo,
           projectPath: this.deps.getProjectPath(),
@@ -227,6 +265,11 @@ export class OrbController extends EventEmitter {
     session.on('event', (evt: NormalizedEvent | { type: string; [k: string]: unknown }) =>
       this.emit('orb-event', evt),
     )
+    if (session instanceof GrokVoiceSession) {
+      session.on('grok-event', (evt: GrokRendererEvent) => this.emit('grok-event', evt))
+    } else if (session instanceof GeminiVoiceSession) {
+      session.on('gemini-event', (evt: GeminiRendererEvent) => this.emit('gemini-event', evt))
+    }
     session.on('turn-end', (ok: boolean) => {
       // A successful turn means the session is healthy — clear any prior
       // crash count so a future single failure doesn't trigger long backoff.
@@ -380,6 +423,107 @@ export class OrbController extends EventEmitter {
     return !!this.session && this.session.isBusy()
   }
 
+  // ─── Realtime voice sessions (ORB_GROK_* / ORB_GEMINI_* IPC) ───
+
+  /**
+   * Tear down the current backend and build a fresh one from the current
+   * settings. Called when a notch realtime toggle (or its key/voice) flips
+   * so the backend choice tracks the user's intent without a relaunch.
+   */
+  async recreateSession(): Promise<void> {
+    log('Recreating orb session (settings changed)')
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer)
+      this.respawnTimer = null
+    }
+    if (this.session) {
+      this.session.shutdown()
+      this.session = null
+    }
+    this.crashCount = 0
+    const rpcInfo = await this.ensureRpc()
+    this.session = this._createSession(rpcInfo)
+    this.started = true
+  }
+
+  private _grokSession(): GrokVoiceSession | null {
+    return this.session instanceof GrokVoiceSession ? this.session : null
+  }
+
+  private _geminiSession(): GeminiVoiceSession | null {
+    return this.session instanceof GeminiVoiceSession ? this.session : null
+  }
+
+  /** Whichever realtime backend is live (they share the recap-gating and
+   *  voice-session surfaces), or null when the local pipeline is active. */
+  private _realtimeSession(): GrokVoiceSession | GeminiVoiceSession | null {
+    return this._grokSession() ?? this._geminiSession()
+  }
+
+  /** Open the realtime socket (creating the grok backend first if needed). */
+  async grokStart(): Promise<{ ok: boolean; error?: string }> {
+    await this.ensureStarted()
+    let grok = this._grokSession()
+    if (!grok) {
+      // Settings say grok but the live session predates the flip (or died) —
+      // rebuild from config. If config doesn't resolve to grok, refuse.
+      const cfg = getGrokVoiceConfig()
+      if (!cfg.enabled) return { ok: false, error: 'Grok voice is not enabled.' }
+      if (!cfg.apiKey) return { ok: false, error: 'No xAI API key — add one in the notch voice settings.' }
+      await this.recreateSession()
+      grok = this._grokSession()
+      if (!grok) return { ok: false, error: 'Grok voice backend could not be created.' }
+    }
+    return grok.startVoiceSession()
+  }
+
+  /** Close the realtime socket (the backend object stays for the next start). */
+  grokStop(): void {
+    this._grokSession()?.endVoiceSession()
+  }
+
+  /** Renderer mic audio passthrough — base64 PCM16 mono @ 24kHz. */
+  grokAppendAudio(base64Pcm: string): void {
+    this._grokSession()?.appendAudio(base64Pcm)
+  }
+
+  /** Push-to-talk ⌥R edge passthrough (no-op unless the session is in PTT). */
+  grokSetHold(active: boolean): void {
+    this._grokSession()?.setHold(active)
+  }
+
+  /** Open the realtime socket (creating the gemini backend first if needed). */
+  async geminiStart(): Promise<{ ok: boolean; error?: string }> {
+    await this.ensureStarted()
+    let gemini = this._geminiSession()
+    if (!gemini) {
+      // Settings say gemini but the live session predates the flip (or died)
+      // — rebuild from config. If config doesn't resolve to gemini, refuse.
+      const cfg = getGeminiVoiceConfig()
+      if (!cfg.enabled) return { ok: false, error: 'Gemini voice is not enabled.' }
+      if (!cfg.apiKey) return { ok: false, error: 'No Google AI API key — add one in the notch voice settings.' }
+      await this.recreateSession()
+      gemini = this._geminiSession()
+      if (!gemini) return { ok: false, error: 'Gemini voice backend could not be created.' }
+    }
+    return gemini.startVoiceSession()
+  }
+
+  /** Close the realtime socket (the backend object stays for the next start). */
+  geminiStop(): void {
+    this._geminiSession()?.endVoiceSession()
+  }
+
+  /** Renderer mic audio passthrough — base64 PCM16 mono @ 24kHz. */
+  geminiAppendAudio(base64Pcm: string): void {
+    this._geminiSession()?.appendAudio(base64Pcm)
+  }
+
+  /** Push-to-talk ⌥R edge passthrough (no-op unless the session is in PTT). */
+  geminiSetHold(active: boolean): void {
+    this._geminiSession()?.setHold(active)
+  }
+
   // ─── Tab context feed (called from main process event wiring) ───
 
   applyControlPlaneEvent(tabId: string, event: NormalizedEvent): void {
@@ -470,7 +614,19 @@ export class OrbController extends EventEmitter {
       // matters: the session's turn ends while TTS is still draining, so
       // without it the recap splices into the tail of the previous answer —
       // and a click to silence that tail destroys the recap with it.
-      if (
+      //
+      // Realtime backends (Grok/Gemini): the renderer's voice-state
+      // heuristic doesn't apply — 'listening' is the RESTING state of an
+      // open realtime session, so gating on it would defer recaps forever.
+      // The session itself knows whether the user is mid-sentence; ask it.
+      const realtime = this._realtimeSession()
+      if (realtime) {
+        if (!realtime.canAcceptSystemTurn()) {
+          log('Autonomous flush deferred — realtime session busy or user speaking')
+          this._scheduleAutonomousFlush(1_500)
+          return
+        }
+      } else if (
         this.lastVoiceState === 'listening' ||
         this.lastVoiceState === 'transcribing' ||
         this.lastVoiceState === 'thinking' ||

@@ -133,15 +133,13 @@ export function SettingsView() {
 
   const handleCheckForUpdates = async () => {
     if (!updater) return
-    if (updater.phase === 'downloaded') {
-      window.rax.installUpdate()
+    // Anything beyond a fresh check happens in the dedicated Software
+    // Update window — release notes, progress, the restart decision.
+    if (updater.phase === 'available' || updater.phase === 'downloading' || updater.phase === 'downloaded') {
+      window.rax.openUpdateWindow().catch(() => {})
       return
     }
-    if (updater.phase === 'available') {
-      window.rax.downloadUpdate().catch(() => {})
-      return
-    }
-    if (updater.phase === 'checking' || updater.phase === 'downloading') return
+    if (updater.phase === 'checking') return
     try {
       const next = await window.rax.checkForUpdates({ userInitiated: true })
       setUpdater(next)
@@ -152,12 +150,12 @@ export function SettingsView() {
     if (!updater) return 'Check for updates'
     switch (updater.phase) {
       case 'checking': return 'Checking…'
-      case 'available': return `Download v${updater.availableVersion}`
+      case 'available': return `Get v${updater.availableVersion}`
       case 'downloading': {
         const pct = Math.round(updater.downloadPercent ?? 0)
-        return `Downloading… ${pct}%`
+        return `Downloading ${pct}%…`
       }
-      case 'downloaded': return `Restart to install v${updater.availableVersion}`
+      case 'downloaded': return `Install v${updater.availableVersion}`
       case 'unsupported': return 'Updates unavailable'
       case 'error': return 'Retry'
       default: return 'Check for updates'
@@ -170,13 +168,13 @@ export function SettingsView() {
       case 'idle': return `You're on v${updater.currentVersion}.`
       case 'checking': return 'Reaching GitHub…'
       case 'not-available': return `v${updater.currentVersion} is the latest.`
-      case 'available': return `v${updater.availableVersion} is available — click to download.`
+      case 'available': return `v${updater.availableVersion} is available — click to see what's new.`
       case 'downloading': {
         const mb = updater.transferred ? (updater.transferred / 1024 / 1024).toFixed(1) : '?'
         const totalMb = updater.total ? (updater.total / 1024 / 1024).toFixed(1) : '?'
         return `Downloading v${updater.availableVersion} (${mb} / ${totalMb} MB)…`
       }
-      case 'downloaded': return `v${updater.availableVersion} ready. Restart to apply.`
+      case 'downloaded': return `v${updater.availableVersion} downloaded — click to restart and apply.`
       case 'error': return updater.error || 'Update check failed.'
       case 'unsupported': return updater.error || 'Auto-update is unavailable in this build.'
     }
@@ -421,7 +419,9 @@ export function SettingsView() {
                 onChange={(e) => setPreferredModel(e.target.value)}
               >
                 {selectableModels.map((m) => (
-                  <option key={m.id} value={m.id}>{getModelDisplayLabel(m.id)}</option>
+                  <option key={m.id} value={m.id} disabled={m.locked}>
+                    {getModelDisplayLabel(m.id)}{m.locked ? ' — locked (top up to unlock)' : ''}
+                  </option>
                 ))}
               </select>
             </div>
@@ -653,7 +653,7 @@ export function SettingsView() {
               <button
                 className="fs-button"
                 onClick={handleCheckForUpdates}
-                disabled={updater?.phase === 'unsupported' || updater?.phase === 'checking' || updater?.phase === 'downloading'}
+                disabled={updater?.phase === 'unsupported' || updater?.phase === 'checking'}
               >
                 {updaterButtonLabel}
               </button>

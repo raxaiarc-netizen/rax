@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Warning } from '@phosphor-icons/react'
+import { CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Warning, LockSimple } from '@phosphor-icons/react'
 import { useSessionStore, AVAILABLE_MODELS, EFFORT_LEVELS, getModelDisplayLabel, useSelectableModels } from '../stores/sessionStore'
 import { DEFAULT_MODEL_ID } from '../../shared/types'
 import { usePopoverLayer } from './PopoverLayer'
@@ -112,15 +112,21 @@ function ModelPicker() {
               return (
                 <button
                   key={m.id}
-                  onClick={() => { setPreferredModel(m.id); setOpen(false) }}
+                  disabled={m.locked}
+                  title={m.locked ? 'Top up Rax credits to unlock' : undefined}
+                  onClick={() => { if (m.locked) return; setPreferredModel(m.id); setOpen(false) }}
                   className="w-full flex items-center justify-between px-3 py-1.5 text-[11px] transition-colors"
                   style={{
                     color: isSelected ? colors.textPrimary : colors.textSecondary,
                     fontWeight: isSelected ? 600 : 400,
+                    opacity: m.locked ? 0.45 : 1,
+                    cursor: m.locked ? 'not-allowed' : undefined,
                   }}
                 >
                   {m.label}
-                  {isSelected && <Check size={12} style={{ color: colors.accent }} />}
+                  {m.locked
+                    ? <LockSimple size={12} style={{ color: colors.textTertiary }} />
+                    : isSelected && <Check size={12} style={{ color: colors.accent }} />}
                 </button>
               )
             })}

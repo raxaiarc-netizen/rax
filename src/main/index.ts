@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, session } from 'electron'
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, session } from 'electron'
 import { join } from 'path'
 import { existsSync, readdirSync, statSync, createReadStream } from 'fs'
 import { createInterface } from 'readline'
@@ -25,9 +25,14 @@ import type { RunOptions, NormalizedEvent, EnrichedError, DeviceMode, MirrorActi
 import { CodeModeController, type CodeModeBroadcast } from './code-mode'
 import { OrbController } from './orb'
 import { TTSManager } from './orb/tts'
+import { getGrokVoiceConfig, saveGrokVoiceConfig, publicGrokConfig, isValidGrokVoice } from './orb/grok-voice-config'
+import { getGeminiVoiceConfig, saveGeminiVoiceConfig, publicGeminiConfig, isValidGeminiVoice } from './orb/gemini-voice-config'
 import { savePersistedVoice, getLocalTtsConfig, synthesizeToTempFile } from './orb/local-tts'
 import { isValidVoice, KOKORO_VOICES } from '../shared/kokoro-voices'
 import { DEFAULT_MASCOT_COLOR_ID, isValidMascotColor } from '../shared/mascot-colors'
+import { applyStationaryOverlay, pinOverlayToSpace } from './native-window-behavior'
+import * as introCameo from './orb/intro-window'
+import { getTourState, saveTourStep, completeTour } from './orb/tour-state'
 import { isAgentId } from '../shared/agents'
 import {
   ensureAccessibilityOnStartup,
@@ -52,6 +57,7 @@ import {
   downloadUpdate as updaterDownload,
   installUpdate as updaterInstall,
   getStatus as updaterGetStatus,
+  prepareWindowsForUpdateInstall,
 } from './updater'
 
 const DEBUG_MODE = process.env.RAX_DEBUG === '1'
@@ -163,6 +169,7 @@ let mainWindow: BrowserWindow | null = null
 let fullscreenWindow: BrowserWindow | null = null
 let orbWindow: BrowserWindow | null = null
 let welcomeWindow: BrowserWindow | null = null
+let updateWindow: BrowserWindow | null = null
 // Vertical agent dock — always-on-top floating window on the left edge of the
 // user's primary display. Shows the five-agent roster (Max/Alex/Luna/Nova/Zara)
 // + status indicators + completion toasts. Lifecycle is slaved to the orb:
@@ -175,6 +182,28 @@ let dockWindow: BrowserWindow | null = null
 // itself is only visible while an orb turn is active (CSS-driven fade) and
 // only when the `voiceCaptionsEnabled` user setting is on.
 let captionPillWindow: BrowserWindow | null = null
+// ─── Intro cameo state ───
+// The mascot's seat inside the orb window (window-relative DIPs, parked
+// bar), pushed by the orb renderer on mount/geometry changes and tagged
+// with the display profile the bar was laid out for — the parked bar is
+// ~52px narrower on notchless displays, so a seat measured under the wrong
+// profile would fly the cameo off the bar's edge. Null until the first
+// push; the per-profile fallback stands in if a summon outwaits the
+// measure — crude is fine, the touchdown happens BEHIND the opaque bar.
+let mascotSeat: { x: number; y: number; width: number; height: number; notched: boolean } | null =
+  null
+// Right-wing mascot of the parked bar centered in the 560-wide window:
+// notched bar spans 136–424, plain pill 188–372.
+const MASCOT_SEAT_FALLBACK = {
+  notched: { x: 396, y: 0, width: 34, height: 34 },
+  plain: { x: 330, y: 0, width: 34, height: 34 },
+} as const
+// While an intro-led summon is staging the orb window, its ready-to-show
+// must NOT auto-show — the bar appears at the cameo's bar-cue instead.
+let orbShowDeferred = false
+// The display the cameo is performing on. The bar-cue show must land on
+// THIS display even if the cursor wandered elsewhere mid-performance.
+let introDisplay: Electron.Display | null = null
 // Renderer-reported flag — true whenever the orb is recording / thinking /
 // talking. We use it to suppress auto-hide-on-blur so a tool the orb itself
 // triggered (which steals focus to the pill) doesn't kill the in-flight turn.
@@ -470,6 +499,47 @@ orb.on('orb-event', (event: unknown) => {
   }
 })
 
+// Grok realtime session events → the orb window (audio deltas, VAD signals,
+// transcript deltas, tool calls). The orb renderer owns playback, so it also
+// owns caption timing — it sends phase-locked segments back up through
+// ORB_GROK_CAPTION below.
+orb.on('grok-event', (event: { type: string; [k: string]: unknown }) => {
+  if (orbWindow && !orbWindow.isDestroyed()) {
+    orbWindow.webContents.send(IPC.ORB_GROK_EVENT, event)
+  }
+})
+
+// Same forwarding for the Gemini realtime backend — its session speaks the
+// identical renderer-event contract over its own channel.
+orb.on('gemini-event', (event: { type: string; [k: string]: unknown }) => {
+  if (orbWindow && !orbWindow.isDestroyed()) {
+    orbWindow.webContents.send(IPC.ORB_GEMINI_EVENT, event)
+  }
+})
+
+// Caption segments for the bottom pill, authored by the orb renderer (it
+// schedules them against the actual audio playback clock, using the
+// transcript deltas' start_time offsets). Translated onto the pill's
+// existing tts_segment/tts_cancelled contract so the pill renderer is
+// untouched.
+function forwardRealtimeCaption(payload: unknown): void {
+  const p = payload as { kind?: string; segment?: Record<string, unknown>; id?: string } | null
+  if (!p || typeof p !== 'object') return
+  if (p.kind === 'segment' && p.segment) {
+    sendToCaptionPill({ type: 'tts_segment', ...p.segment })
+  } else if (p.kind === 'clear') {
+    sendToCaptionPill({ type: 'tts_cancelled', id: String(p.id || '') })
+  }
+}
+ipcMain.on(IPC.ORB_GROK_CAPTION, (_event, payload: unknown) => forwardRealtimeCaption(payload))
+ipcMain.on(IPC.ORB_GEMINI_CAPTION, (_event, payload: unknown) => forwardRealtimeCaption(payload))
+
+// While the first-install tour is performing, its own guidance card carries
+// the words — the bottom caption pill would be redundant clutter, so main
+// suppresses caption-pill forwarding (set via ORB_TOUR_ACTIVE). The notch
+// waveform 'levels' push is NOT gated: the mascot should still dance.
+let tourSuppressCaptions = false
+
 const tts = new TTSManager()
 tts.on('done', (id: string) => {
   if (orbWindow && !orbWindow.isDestroyed()) {
@@ -493,9 +563,11 @@ tts.on('levels', (payload: { id: string; startedAtMs: number; frameMs: number; l
 // of the alignment is known by the time playback begins, the rest fills in
 // during the first ~200ms.
 tts.on('segment', (segment: { id: string; text: string; alignment: { chars: string[]; starts: number[]; ends: number[] }; startedAtMs: number }) => {
+  if (tourSuppressCaptions) return
   sendToCaptionPill({ type: 'tts_segment', ...segment })
 })
 tts.on('alignment', (payload: { id: string; alignment: { chars: string[]; starts: number[]; ends: number[] } }) => {
+  if (tourSuppressCaptions) return
   sendToCaptionPill({ type: 'tts_alignment', ...payload })
 })
 tts.on('cancelled', (id: string) => {
@@ -652,13 +724,15 @@ function createWindow(): void {
     // { forward: true } ensures mousemove events still reach the renderer
     // so it can toggle click-through off when cursor enters interactive UI.
     mainWindow?.setIgnoreMouseEvents(true, { forward: true })
-    if (process.env.ELECTRON_RENDERER_URL) {
-      mainWindow?.webContents.openDevTools({ mode: 'detach' })
-    }
   })
 
   let forceQuit = false
   app.on('before-quit', () => { forceQuit = true })
+  // Native Squirrel quitAndInstall closes windows BEFORE app.quit(), so
+  // 'before-quit' alone would leave the guard armed and deadlock the
+  // update install. Electron's native autoUpdater emits this dedicated
+  // event first, before any window is asked to close.
+  nativeAutoUpdater.on('before-quit-for-update', () => { forceQuit = true })
   mainWindow.on('close', (e) => {
     if (!forceQuit) {
       e.preventDefault()
@@ -732,7 +806,7 @@ function createWelcomeWindow(): void {
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
-    backgroundColor: '#0c0c0e',
+    backgroundColor: '#ffffff',
     icon: join(__dirname, '../../resources/icon.icns'),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     trafficLightPosition: process.platform === 'darwin' ? { x: 14, y: 14 } : undefined,
@@ -828,6 +902,110 @@ ipcMain.handle(IPC.WELCOME_CLOSE, () => {
 })
 
 /**
+ * Software Update window. Welcome-style standalone surface that renders the
+ * live UpdaterStatus: release notes + download button when an update is
+ * available, live progress while downloading, and the restart prompt once
+ * it's ready. Opened from the tray, Settings, or by the updater itself when
+ * a background download completes.
+ */
+function createUpdateWindow(): void {
+  if (updateWindow && !updateWindow.isDestroyed()) {
+    updateWindow.show()
+    updateWindow.moveTop()
+    updateWindow.focus()
+    return
+  }
+
+  const cursor = screen.getCursorScreenPoint()
+  const display = screen.getDisplayNearestPoint(cursor)
+  const { width: sw, height: sh } = display.workAreaSize
+  const { x: dx, y: dy } = display.workArea
+
+  const w = 520
+  const h = 600
+  const x = dx + Math.round((sw - w) / 2)
+  const y = dy + Math.round((sh - h) / 2.4)
+
+  updateWindow = new BrowserWindow({
+    width: w,
+    height: h,
+    x,
+    y,
+    title: 'Software Update',
+    show: false,
+    frame: process.platform !== 'darwin',
+    transparent: false,
+    resizable: false,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: '#ffffff',
+    icon: join(__dirname, '../../resources/icon.icns'),
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    trafficLightPosition: process.platform === 'darwin' ? { x: 14, y: 14 } : undefined,
+    webPreferences: {
+      preload: join(__dirname, '../preload/update.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+    },
+  })
+
+  updateWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  updateWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+  updateWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    log(`[update] did-fail-load code=${code} desc=${desc} url=${url}`)
+  })
+
+  const url = process.env.ELECTRON_RENDERER_URL
+    ? `${process.env.ELECTRON_RENDERER_URL}/update.html`
+    : null
+  if (url) {
+    updateWindow.loadURL(url)
+  } else {
+    updateWindow.loadFile(join(__dirname, '../renderer/update.html'))
+  }
+
+  const showUpdateWindow = () => {
+    if (!updateWindow || updateWindow.isDestroyed() || updateWindow.isVisible()) return
+    // Same accessory-mode dance as the welcome window: appear on the
+    // user's current Space and briefly float above the pill.
+    updateWindow.setAlwaysOnTop(true, 'screen-saver')
+    updateWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    if (process.platform === 'darwin' && app.dock) {
+      app.dock.show().catch(() => {})
+    }
+    updateWindow.show()
+    updateWindow.moveTop()
+    updateWindow.focus()
+    if (process.platform === 'darwin') app.focus({ steal: true })
+    setTimeout(() => {
+      if (updateWindow && !updateWindow.isDestroyed()) {
+        updateWindow.setAlwaysOnTop(false)
+        updateWindow.setVisibleOnAllWorkspaces(false)
+      }
+    }, 1200)
+  }
+
+  updateWindow.webContents.once('did-finish-load', showUpdateWindow)
+  updateWindow.once('ready-to-show', showUpdateWindow)
+  setTimeout(showUpdateWindow, 1500)
+
+  updateWindow.on('closed', () => {
+    updateWindow = null
+    // Restore accessory mode unless another chrome window still needs the
+    // dock icon (the welcome flow shows it too).
+    if (process.platform === 'darwin' && app.dock && (!welcomeWindow || welcomeWindow.isDestroyed())) {
+      app.dock.hide()
+    }
+  })
+}
+
+ipcMain.handle(IPC.UPDATER_OPEN_WINDOW, () => createUpdateWindow())
+
+/**
  * Finish onboarding: create the pill (deferred at boot) and show it,
  * then close the welcome window. Wired to the "Launch Rax" button on
  * the welcome's success screen.
@@ -838,15 +1016,18 @@ ipcMain.handle(IPC.LAUNCH_PILL, async () => {
     createWindow()
     snapshotWindowState('after deferred createWindow')
   }
-  // The dock no longer rides along with the pill — it's slaved to the orb's
-  // visibility (see showOrbWindow / hideOrbWindow), so new users will see it
-  // appear the first time they summon the voice orb.
   // Wait one tick for ready-to-show to land if this is the first create.
   await new Promise((r) => setTimeout(r, 50))
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (!mainWindow.isVisible()) mainWindow.show()
     mainWindow.focus()
   }
+  // First real launch: bring up the notch (and the dock slaved to it) right
+  // away — it's the default surface, ⇧⌘O hides it. Led by the FULL intro
+  // cameo (the catch-me-if-you-can game) — the new user's first hello. This
+  // is the only place the game plays; every later boot gets the short
+  // 'glance' opener instead.
+  void summonOrbWithIntro('game')
   if (welcomeWindow && !welcomeWindow.isDestroyed()) {
     welcomeWindow.close()
   }
@@ -967,9 +1148,6 @@ function createFullscreenWindow(): void {
     // Likewise, broadcast the mode change once the window is actually visible
     // so renderers don't react to a state that's not yet on screen.
     broadcastFullscreenMode(true)
-    if (process.env.ELECTRON_RENDERER_URL) {
-      fullscreenWindow.webContents.openDevTools({ mode: 'detach' })
-    }
     // Send initial native-fullscreen state in case the window restored into it.
     fullscreenWindow.webContents.send(
       IPC.FULLSCREEN_NATIVE_STATE,
@@ -1041,10 +1219,13 @@ function toggleFullscreenWindow(): void {
 // down. The strip is mostly click-through — only the bar grabs the pointer
 // (see the renderer's `.notch-shell` hit test).
 const ORB_WINDOW_WIDTH = 560
-// Tall enough for the bar's settings mode (152px panel) plus its drop
-// shadow and the error toast that parks below the expanded bar. The extra
-// strip is transparent and click-through, so it costs nothing.
-const ORB_WINDOW_HEIGHT = 210
+// Tall enough for the bar's settings mode at its tallest — 38px header +
+// 13×38px rows = 532px with BOTH the Grok (+3 rows) and Gemini (+4 rows)
+// sections expanded (see settingsRows in orb/App.tsx — keep in sync) — plus
+// its drop shadow and the error toast that parks below the expanded bar.
+// Too short and the window edge chips the panel's bottom corners flat. The
+// extra strip is transparent and click-through, so it costs nothing.
+const ORB_WINDOW_HEIGHT = 600
 
 // Caption-pill window sits at the bottom-center of the display containing
 // the orb. Sized to comfortably fit the glass pill (max-width: 540px text +
@@ -1163,11 +1344,43 @@ function reassertOrbVisibility(reason: string, opts: { initial?: boolean } = {})
     }
     if (!opts.initial) visOpts.skipTransformProcessType = true
     orbWindow.setVisibleOnAllWorkspaces(true, visOpts)
-    orbWindow.setAlwaysOnTop(true, 'screen-saver')
-    if (DEBUG_MODE) log(`[orb] re-assert always-on-top (${reason})`)
+    // statusBar+1, NOT screen-saver: the menu-bar level band CROSS-FADES
+    // during three-finger Space swipes while higher bands slide with the
+    // space content — at screen-saver level the notch visibly rode the
+    // swipe and blinked out mid-transition. openclicky pins its notch
+    // surface at exactly this level for the same reason (statusBar exactly
+    // gets reordered under the menu bar when spaces settle; +1 avoids the
+    // vanish/reappear).
+    orbWindow.setAlwaysOnTop(true, 'status', 1)
+    // Stationary (native addon) keeps the notch ON SCREEN while Mission
+    // Control is up — the HeyClicky behavior — and still excludes it from the
+    // window tiles. Electron's own hiddenInMissionControl maps to transient,
+    // which macOS removes for the duration of Mission Control; the two flags
+    // are mutually exclusive, so transient is only the no-addon fallback.
+    if (!applyStationaryOverlay(orbWindow)) orbWindow.setHiddenInMissionControl(true)
+    // Move into the private always-shown space so a three-finger Space swipe
+    // doesn't drag the notch off with the outgoing desktop. MUST run after
+    // setVisibleOnAllWorkspaces above (that call re-attaches it to the user
+    // spaces). No-op until the window has a live window number (post-show).
+    pinOverlayToSpace(orbWindow)
+    if (DEBUG_MODE && reason !== 'heartbeat') log(`[orb] re-assert always-on-top (${reason})`)
   } catch (err) {
     log(`Orb re-assert failed (${reason}): ${(err as Error).message}`)
   }
+}
+
+// Order an overlay panel onto the screen WITHOUT making it the key window.
+// Two macOS quirks meet here: showInactive() on a focusable:false NSPanel can
+// leave the window alive in the window server but never on screen (see the
+// caption pill note below), while show() steals key focus from whatever the
+// user is typing in — and a key notch then swallows Space/Enter meant for
+// the real app. So: briefly focusable, ordered front inactive, then locked
+// non-focusable again. The notch and dock are overlays in the spirit of the
+// hardware notch — clickable, but never "selected".
+function showOverlayInactive(win: BrowserWindow): void {
+  win.setFocusable(true)
+  win.showInactive()
+  win.setFocusable(false)
 }
 
 function createOrbWindow(): void {
@@ -1178,7 +1391,7 @@ function createOrbWindow(): void {
 
   // The notch is fixed at the top-center of the display under the cursor,
   // flush with the very top edge (bounds.y, behind the menu bar / hardware
-  // notch — the screen-saver window level draws it over the menu bar). Unlike
+  // notch — the statusBar+1 window level draws it over the menu bar). Unlike
   // the old free-floating orb, it isn't draggable, so there's no saved
   // position to restore.
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
@@ -1200,6 +1413,10 @@ function createOrbWindow(): void {
     roundedCorners: true,
     backgroundColor: '#00000000',
     show: false,
+    // The notch must read as part of the hardware notch, not an app window:
+    // Mission Control / Exposé must not pick it up and offer it as a
+    // selectable window (NSWindowCollectionBehaviorTransient under the hood).
+    hiddenInMissionControl: true,
     // Allow positioning past the menu bar / off-screen edges. Without this,
     // macOS clamps the window to the work area so the orb stops short of the
     // very top of the screen. Despite the name, this option governs both size
@@ -1226,8 +1443,27 @@ function createOrbWindow(): void {
   // remove it — that's the whole point of a persistent ambient agent.
 
   orbWindow.once('ready-to-show', () => {
-    orbWindow?.show()
-    orbWindow?.focus()
+    if (!orbWindow || orbWindow.isDestroyed()) return
+    // Start fully click-through so the transparent corners pass clicks down
+    // to the desktop — must apply whether or not the show is deferred below
+    // (the renderer's mousemove handler manages capture from here on).
+    // `forward: true` is critical — without it, the renderer never receives
+    // the mousemove that signals "you're now over the orb".
+    orbWindow.setIgnoreMouseEvents(true, { forward: true })
+    // Intro-led summons stage the window hidden: the cameo's bar-cue calls
+    // showOrbWindow() at the choreographed moment instead.
+    if (orbShowDeferred) return
+    // Surface without becoming key, then lock focusability off — the notch
+    // is an overlay, not an app window. A focused notch swallows keystrokes
+    // (Space would start push-to-talk while the user types elsewhere). The
+    // ORB_SET_FOCUSABLE IPC re-enables focus only while the settings panel
+    // (which has real text inputs) is open.
+    showOverlayInactive(orbWindow)
+    // Now that the window has a live window number, pin it into the private
+    // always-shown space immediately — the create-time reassert ran before
+    // show (no window number yet), so without this the first pin would wait
+    // for the 2.5s heartbeat and an immediate swipe could still slide it.
+    pinOverlayToSpace(orbWindow)
     // The pill's own ready-to-show only shows it when the orb is already
     // visible (orphan-surface guard); if the pill readied first, that check
     // failed and its once-handler is spent — show it from here instead.
@@ -1235,15 +1471,7 @@ function createOrbWindow(): void {
     // window (nothing to flash).
     if (captionPillWindow && !captionPillWindow.isDestroyed() && !captionPillWindow.isVisible()) {
       captionPillWindow.showInactive()
-    }
-    // Start fully click-through so the transparent corners pass clicks down to
-    // the desktop. The renderer's mousemove handler turns capture back on
-    // when the cursor enters the orb's circular hit zone, and back off when
-    // it leaves. `forward: true` is critical — without it, the renderer
-    // never receives the mousemove that signals "you're now over the orb".
-    orbWindow?.setIgnoreMouseEvents(true, { forward: true })
-    if (process.env.ELECTRON_RENDERER_URL) {
-      orbWindow?.webContents.openDevTools({ mode: 'detach' })
+      pinOverlayToSpace(captionPillWindow)
     }
   })
 
@@ -1253,6 +1481,10 @@ function createOrbWindow(): void {
 
   orbWindow.on('closed', () => {
     orbWindow = null
+    if (orbHideTimer) {
+      clearTimeout(orbHideTimer)
+      orbHideTimer = null
+    }
     // Tear down the caption pill along with the orb. The caption is a pure
     // companion surface — it has no reason to outlive the orb.
     destroyCaptionPillWindow()
@@ -1356,10 +1588,15 @@ function createCaptionPillWindow(): void {
   // Pill is a passive caption — must never intercept clicks.
   captionPillWindow.setIgnoreMouseEvents(true, { forward: false })
   // Travel across every Space + every fullscreen app, same as the orb. The
-  // orb-style screen-saver level keeps it on top of native fullscreen apps.
+  // orb-style statusBar+1 level rides the menu-bar layer (which cross-fades
+  // instead of sliding on Space swipes) and still tops fullscreen apps via
+  // the fullScreenAuxiliary collection behavior.
   try {
     captionPillWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-    captionPillWindow.setAlwaysOnTop(true, 'screen-saver')
+    captionPillWindow.setAlwaysOnTop(true, 'status', 1)
+    // Stationary like the notch: stay on screen through Mission Control.
+    if (!applyStationaryOverlay(captionPillWindow)) captionPillWindow.setHiddenInMissionControl(true)
+    pinOverlayToSpace(captionPillWindow)
   } catch {}
 
   captionPillWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -1371,10 +1608,8 @@ function createCaptionPillWindow(): void {
     // unconditionally here would leave an orphan always-on-top surface.
     if (!orbWindow || orbWindow.isDestroyed() || !orbWindow.isVisible()) return
     captionPillWindow?.showInactive()
+    if (captionPillWindow) pinOverlayToSpace(captionPillWindow)
     log(`[caption-pill] shown at ${x},${y} ${width}×${height}`)
-    if (process.env.ELECTRON_RENDERER_URL) {
-      captionPillWindow?.webContents.openDevTools({ mode: 'detach' })
-    }
   })
 
   captionPillWindow.on('closed', () => {
@@ -1400,7 +1635,25 @@ function repositionCaptionPillWindow(): void {
   captionPillWindow.setBounds(bounds)
 }
 
-function showOrbWindow(): void {
+function showOrbWindow(opts: { display?: Electron.Display; fromIntro?: boolean } = {}): void {
+  // A plain show while the cameo is performing (push-to-talk summon, voice
+  // flows…) means the user wants the notch NOW — clear the stage first and
+  // thud the mascot straight in after the show below.
+  const abortedIntro = !opts.fromIntro && introCameo.isIntroActive()
+  if (abortedIntro) {
+    introCameo.destroyIntro()
+    introDisplay = null
+  }
+  // A show during the dismissal contraction (toggle spam, quick re-summon)
+  // rescues the bar: cancel the pending hide and re-cue the entrance below —
+  // the window never flips visibility, so no visibilitychange would fire.
+  let rescuedFromHide = false
+  if (orbHideTimer) {
+    clearTimeout(orbHideTimer)
+    orbHideTimer = null
+    rescuedFromHide = true
+  }
+  orbShowDeferred = false
   if (!orbWindow || orbWindow.isDestroyed()) {
     createOrbWindow()
     // The dock stays hidden by default — it surfaces on crew dispatch, on
@@ -1409,16 +1662,26 @@ function showOrbWindow(): void {
     if (dockIntent === 'shown') showDockWindow('restore')
     // Crew recaps that piled up while no orb existed get a voice again.
     orb.flushPendingRecaps()
+    if (abortedIntro) pushOrbEntrance('land')
     return
   }
   // Re-summon follows the user: pin to the display the cursor is on, not
   // wherever the island was last dismissed — summoning on monitor B while
-  // it sits invisible on monitor A reads as "nothing happened".
-  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  // it sits invisible on monitor A reads as "nothing happened". The intro
+  // flow pins to the cameo's display instead: the seat coordinates the
+  // mascot just flew to are only valid there.
+  const display = opts.display ?? screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
   orbWindow.setBounds(computeNotchBounds(display))
   reassertOrbVisibility('show')
-  orbWindow.show()
-  orbWindow.focus()
+  const wasVisible = orbWindow.isVisible()
+  // Never show() + focus(): summoning the notch must not yank the keyboard
+  // away from the app the user is working in.
+  showOverlayInactive(orbWindow)
+  // Explicit entrance cue whenever the notch genuinely (re)appears. The
+  // renderer's visibility flip can't be the sole trigger: a first-load
+  // window painted while hidden reports document 'visible' the whole time,
+  // and a rescued contraction never flips visibility at all.
+  if (!wasVisible || rescuedFromHide) pushOrbEntrance('show')
   // Bring the caption pill back alongside (hidden with the orb) and move it
   // to the same display.
   if (captionPillWindow && !captionPillWindow.isDestroyed()) {
@@ -1432,11 +1695,164 @@ function showOrbWindow(): void {
   // Recaps deferred while the orb was hidden can speak now.
   orb.flushPendingRecaps()
   orb.ensureStarted().catch((err) => log(`Orb start error: ${(err as Error).message}`))
+  if (abortedIntro) pushOrbEntrance('land')
 }
+
+// ─── Intro cameo orchestration ───
+// The notch's opening number: a transparent full-display window where the
+// big mascot materializes center-screen, scans the desktop, then leaps up
+// and merges into the bar (src/renderer/intro). Two variants: 'game' (the
+// catch-me-if-you-can chase) plays exactly once, on the onboarding "Launch
+// Rax" — a first-install hello. 'glance' (spawn, take a good look at the
+// screen for a few seconds, leap to the notch) plays on every app boot.
+// Mid-session hide/show (⇧⌘O, tray, ORB_TOGGLE) and programmatic shows
+// (push-to-talk, voice flows) stay plain — the bar's own expand/collapse
+// entrance covers those.
+
+function pushOrbEntrance(kind: 'hold' | 'land' | 'show' | 'hide'): void {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  orbWindow.webContents.send(IPC.ORB_ENTRANCE, { kind })
+}
+
+/** Wait briefly for a renderer seat measure taken under the display profile
+ *  the cameo is staging on — pushes tagged with the wrong profile (stale
+ *  geometry from the previous display) don't count. */
+async function waitForMascotSeat(
+  timeoutMs: number,
+  wantNotched: boolean,
+): Promise<{ x: number; y: number; width: number; height: number }> {
+  const t0 = Date.now()
+  while ((!mascotSeat || mascotSeat.notched !== wantNotched) && Date.now() - t0 < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 60))
+  }
+  if (mascotSeat && mascotSeat.notched === wantNotched) return mascotSeat
+  return wantNotched ? MASCOT_SEAT_FALLBACK.notched : MASCOT_SEAT_FALLBACK.plain
+}
+
+async function summonOrbWithIntro(variant: introCameo.IntroVariant): Promise<void> {
+  if (introCameo.isIntroActive()) return
+  if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()) {
+    // Mid-contraction the window is still technically visible — the user
+    // wants it back: rescue with a plain show (which cancels the pending
+    // hide and re-cues the entrance) instead of starting a cameo over a
+    // window that's already up.
+    if (orbHideTimer) showOrbWindow()
+    return
+  }
+  const cursorPt = screen.getCursorScreenPoint()
+  const display = screen.getDisplayNearestPoint(cursorPt)
+  introDisplay = display
+  const wantNotched = displayHasNotch(display)
+  // Fresh flight plan: a seat measured on the previous display (or under
+  // the other profile) must not satisfy the wait below.
+  mascotSeat = null
+
+  // Stage the orb window hidden on the target display so (a) the renderer
+  // can measure the mascot's seat and (b) the bar-cue show is instant.
+  if (!orbWindow || orbWindow.isDestroyed()) {
+    orbShowDeferred = true
+    createOrbWindow()
+  } else {
+    orbWindow.setBounds(computeNotchBounds(display))
+    sendOrbDisplayProfile()
+  }
+  // Arm the entrance hold — the seat must stay empty while the cameo's big
+  // mascot performs. (Lost on a cold-boot renderer that hasn't subscribed
+  // yet; ORB_RENDERER_READY re-arms while a cameo is active.)
+  pushOrbEntrance('hold')
+
+  const seat = await waitForMascotSeat(1500, wantNotched)
+  // The stage may have been struck while we waited (plain show aborted the
+  // summon, user toggled, app is quitting…).
+  if (introCameo.isIntroActive() || !introDisplay) return
+  if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()) {
+    introDisplay = null // summon superseded — don't leave the arm latched
+    return
+  }
+  // Re-arm the hold now that the renderer is provably alive (on a cold boot
+  // it just pushed the seat measure — the staging push above predated its
+  // IPC subscriptions and was dropped on the floor).
+  pushOrbEntrance('hold')
+  const orbBounds =
+    orbWindow && !orbWindow.isDestroyed()
+      ? orbWindow.getBounds()
+      : computeNotchBounds(display)
+
+  introCameo.playIntro(
+    display,
+    {
+      seat: {
+        x: orbBounds.x + seat.x,
+        y: orbBounds.y + seat.y,
+        size: Math.max(seat.width, seat.height),
+      },
+      colorId: getOrbMascotColorId(),
+      variant,
+      // Screen DIPs (like seat) — the game variant spawns the mascot away
+      // from the pointer so a parked cursor can't trigger the first dodge.
+      cursor: { x: cursorPt.x, y: cursorPt.y },
+    },
+    {
+      onBarCue: () => {
+        // showOrbWindow pushes the explicit 'show' entrance cue itself.
+        showOrbWindow({ display: introDisplay ?? undefined, fromIntro: true })
+      },
+      onDone: () => {
+        // Touchdown — he's behind the bar; swap in the notch mascot.
+        if (!(orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible())) {
+          // Bar-cue never landed (extreme edge) — show before releasing.
+          showOrbWindow({ display: introDisplay ?? undefined, fromIntro: true })
+        }
+        pushOrbEntrance('land')
+        introDisplay = null
+      },
+      onGone: (reason) => {
+        // Cameo died mid-performance — the user still asked for the notch.
+        log(`[intro] cameo gone (${reason}) — falling back to plain show`)
+        if (!(orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible())) {
+          showOrbWindow({ display: introDisplay ?? undefined, fromIntro: true })
+        }
+        pushOrbEntrance('land')
+        introDisplay = null
+      },
+    },
+  )
+}
+
+/** ⇧⌘O while the cameo is mid-performance = "cut to the chase": clear the
+ *  stage and put the notch up immediately. */
+function skipIntro(): void {
+  if (!introCameo.isIntroActive()) return
+  introCameo.destroyIntro()
+  if (!(orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible())) {
+    showOrbWindow({ display: introDisplay ?? undefined, fromIntro: true })
+  }
+  pushOrbEntrance('land')
+  introDisplay = null
+}
+
+// Dismissal contraction: the bar shrinks back INTO the notch before the
+// window actually hides. Not just polish — the compositor re-presents the
+// window's LAST painted frame when it is next shown, so hiding on a
+// full-width bar made every re-summon flash that stale full bar for a beat
+// before the entrance reset it (read as "expanding twice"). Contracting
+// first leaves the collapsed-notch pose in the buffer — exactly the pose
+// the next entrance animates out of. The renderer's exit animation runs
+// 340ms; hide a beat after it settles.
+const ORB_EXIT_MS = 370
+let orbHideTimer: NodeJS.Timeout | null = null
 
 function hideOrbWindow(): void {
   if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()) {
-    orbWindow.hide()
+    if (!orbHideTimer) {
+      pushOrbEntrance('hide')
+      orbHideTimer = setTimeout(() => {
+        orbHideTimer = null
+        if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()) orbWindow.hide()
+      }, ORB_EXIT_MS)
+    }
+    // Everything below stays IMMEDIATE — only the window hide waits for the
+    // contraction. Audio/captions must die the moment the user dismisses.
     // Dock follows the orb — when the orb leaves the screen the dock goes
     // with it. 'companion' cause: this isn't a judgement about the dock, so
     // a pinned ('shown') dock comes back on the next orb summon.
@@ -1477,9 +1893,19 @@ function hideOrbWindow(): void {
 }
 
 function toggleOrbWindow(): void {
-  if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible()) {
+  // Mid-cameo, the toggle is a "skip" — an impatient second ⇧⌘O should cut
+  // the show and put the bar up, never hide an orb that isn't on yet.
+  if (introCameo.isIntroActive()) {
+    skipIntro()
+    return
+  }
+  // A bar mid-contraction (pending hide) counts as hidden — a second toggle
+  // during the 240ms exit means "bring it back", never "hide it harder".
+  if (orbWindow && !orbWindow.isDestroyed() && orbWindow.isVisible() && !orbHideTimer) {
     hideOrbWindow()
   } else {
+    // Mid-session re-summon: no cameo — the bar's own expand entrance is the
+    // animation. The cameo is reserved for app opens (boot / onboarding).
     showOrbWindow()
   }
 }
@@ -1607,8 +2033,12 @@ function reassertDockVisibility(reason: string, opts: { initial?: boolean } = {}
     }
     if (!opts.initial) visOpts.skipTransformProcessType = true
     dockWindow.setVisibleOnAllWorkspaces(true, visOpts)
-    dockWindow.setAlwaysOnTop(true, 'screen-saver')
-    if (DEBUG_MODE) log(`[dock] re-assert always-on-top (${reason})`)
+    // statusBar+1 like the notch — survives Space-swipe transitions.
+    dockWindow.setAlwaysOnTop(true, 'status', 1)
+    // Same stationary treatment as the notch — survive Mission Control.
+    if (!applyStationaryOverlay(dockWindow)) dockWindow.setHiddenInMissionControl(true)
+    pinOverlayToSpace(dockWindow)
+    if (DEBUG_MODE && reason !== 'heartbeat') log(`[dock] re-assert always-on-top (${reason})`)
   } catch (err) {
     log(`Dock re-assert failed (${reason}): ${(err as Error).message}`)
   }
@@ -1662,6 +2092,9 @@ function createDockWindow(cause: DockCause = 'user'): void {
     roundedCorners: true,
     backgroundColor: '#00000000',
     show: false,
+    // Same overlay treatment as the notch: invisible to Mission Control,
+    // never the key window (the dock is all click-targets, no text input).
+    hiddenInMissionControl: true,
     enableLargerThanScreen: true,
     icon: join(__dirname, '../../resources/icon.icns'),
     webPreferences: {
@@ -1684,7 +2117,11 @@ function createDockWindow(cause: DockCause = 'user'): void {
     // this fires the caller wants the dock visible. The dock is hidden by
     // default at start; we persist position so it returns to where the user
     // last parked it.
-    dockWindow.show()
+    showOverlayInactive(dockWindow)
+    // Pin into the private always-shown space now that the window number is
+    // live (the create-time reassert ran pre-show). Keeps the dock from
+    // sliding off during three-finger Space swipes.
+    pinOverlayToSpace(dockWindow)
     notifyOrbDockVisible()
     sendDockMode()
     // Start fully click-through; the renderer flips capture back on when the
@@ -1728,7 +2165,7 @@ function showDockWindow(cause: DockCause = 'user'): void {
   // column glides back in.
   cancelPendingDockHide()
   reassertDockVisibility('show')
-  dockWindow.show()
+  showOverlayInactive(dockWindow)
   const b = dockWindow.getBounds()
   saveDockState({ x: b.x, y: b.y, visible: true })
   // Tray label flips between "Show Agent Dock" and "Hide Agent Dock" based on
@@ -1880,6 +2317,25 @@ ipcMain.on(IPC.SET_IGNORE_MOUSE_EVENTS, (event, ignore: boolean, options?: { for
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win && !win.isDestroyed()) {
     win.setIgnoreMouseEvents(ignore, options || {})
+  }
+})
+
+// The notch is non-focusable by default (overlay, not an app window) so it
+// can never swallow keystrokes meant for the app beneath it. One exception:
+// the settings panel hosts real text inputs (API keys), which need the
+// window to be key while the panel is open. The renderer toggles this around
+// the panel's lifetime.
+ipcMain.on(IPC.ORB_SET_FOCUSABLE, (_event, focusable: boolean) => {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  try {
+    orbWindow.setFocusable(!!focusable)
+    // setFocusable(false) alone leaves the panel as the key window — it
+    // keeps swallowing keystrokes and reads as "selected". Resign key
+    // explicitly when handing focusability back.
+    if (focusable) orbWindow.focus()
+    else orbWindow.blur()
+  } catch (err) {
+    log(`Orb focusable toggle failed: ${(err as Error).message}`)
   }
 })
 
@@ -2913,17 +3369,216 @@ function endHold(): void {
   }
 }
 
+// Mascot seat reports from the orb renderer (window-relative DIPs) — the
+// intro cameo's flight target. Sanity-clamped: a bogus rect would fly the
+// mascot somewhere absurd.
+ipcMain.on(IPC.ORB_MASCOT_SEAT, (_e, seat: { x?: unknown; y?: unknown; width?: unknown; height?: unknown; notched?: unknown }) => {
+  if (
+    typeof seat?.x === 'number' && Number.isFinite(seat.x) &&
+    typeof seat?.y === 'number' && Number.isFinite(seat.y) &&
+    typeof seat?.width === 'number' && seat.width > 3 && seat.width < 200 &&
+    typeof seat?.height === 'number' && seat.height > 3 && seat.height < 200 &&
+    // y tolerates a few px above the window edge: the 34px mascot centered
+    // in the 32px parked row legitimately measures y = -1 (a hard >= 0
+    // rejected EVERY real seat and silently forced the fallback).
+    seat.x >= 0 && seat.x < ORB_WINDOW_WIDTH && seat.y >= -8 && seat.y < ORB_WINDOW_HEIGHT
+  ) {
+    mascotSeat = { x: seat.x, y: seat.y, width: seat.width, height: seat.height, notched: seat.notched === true }
+  }
+})
+
 ipcMain.on(IPC.ORB_RENDERER_READY, () => {
   log('Orb renderer ready — flushing any pending force-listen / hold-start')
   // The renderer's IPC listeners exist now — safe to push the display
   // profile (a did-finish-load push could land before React subscribes).
   sendOrbDisplayProfile()
-  // Same timing rule for the mascot's persisted colorway and the dock
-  // toggle's initial state.
+  // A cold-boot intro summon armed the entrance hold before this renderer
+  // could hear it — re-arm now that the listeners are live. introDisplay
+  // covers the staging gap (summon started, cameo not yet playing).
+  if (introCameo.isIntroActive() || introDisplay) pushOrbEntrance('hold')
+  // Same timing rule for the mascot's persisted colorway, the realtime
+  // voice configs, and the dock toggle's initial state.
   sendOrbMascotColor()
+  sendOrbGrokConfig()
+  sendOrbGeminiConfig()
   notifyOrbDockVisible()
   flushPendingForceListen()
   flushPendingHoldStart()
+})
+
+// ─── Grok voice (realtime backend) IPC ───
+
+function sendOrbGrokConfig(): void {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  orbWindow.webContents.send(IPC.ORB_GROK_CONFIG, publicGrokConfig())
+}
+
+ipcMain.handle(IPC.ORB_GROK_GET_CONFIG, () => {
+  return publicGrokConfig()
+})
+
+ipcMain.handle(IPC.ORB_GROK_SET_CONFIG, async (_event, partial: unknown) => {
+  const p = (partial && typeof partial === 'object' ? partial : {}) as {
+    enabled?: unknown
+    apiKey?: unknown
+    voice?: unknown
+    pushToTalk?: unknown
+  }
+  if (p.voice !== undefined && (typeof p.voice !== 'string' || !isValidGrokVoice(p.voice))) {
+    return { ok: false, error: `unknown grok voice: ${String(p.voice).slice(0, 40)}` }
+  }
+  const before = getGrokVoiceConfig()
+  const clean: { enabled?: boolean; apiKey?: string; voice?: string; pushToTalk?: boolean } = {}
+  if (typeof p.enabled === 'boolean') clean.enabled = p.enabled
+  if (typeof p.apiKey === 'string') clean.apiKey = p.apiKey
+  if (typeof p.voice === 'string') clean.voice = p.voice
+  if (typeof p.pushToTalk === 'boolean') clean.pushToTalk = p.pushToTalk
+  const saved = saveGrokVoiceConfig(clean)
+  const after = getGrokVoiceConfig()
+  // One realtime backend at a time: switching Grok on switches Gemini off.
+  if (clean.enabled === true && getGeminiVoiceConfig().enabled) {
+    saveGeminiVoiceConfig({ enabled: false })
+    sendOrbGeminiConfig()
+  }
+  // Rebuild the orb backend whenever the change affects which session class
+  // should be live or how it would connect. endVoiceSession runs inside the
+  // old session's shutdown, so a live realtime call ends cleanly.
+  const backendChanged =
+    before.enabled !== after.enabled ||
+    before.apiKey !== after.apiKey ||
+    before.voice !== after.voice ||
+    // turn_detection is connect-time config — a live open-mic session can't
+    // become push-to-talk in place, so rebuild (ends any live call cleanly).
+    before.pushToTalk !== after.pushToTalk
+  if (backendChanged) {
+    try {
+      await orb.recreateSession()
+    } catch (err) {
+      log(`Grok config: session recreate failed: ${(err as Error).message}`)
+    }
+  }
+  sendOrbGrokConfig()
+  if (!saved) {
+    return {
+      ok: false,
+      config: publicGrokConfig(),
+      error: 'settings applied for this session but could not be saved to disk',
+    }
+  }
+  return { ok: true, config: publicGrokConfig() }
+})
+
+ipcMain.handle(IPC.ORB_GROK_START, async () => {
+  try {
+    return await orb.grokStart()
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+})
+
+ipcMain.handle(IPC.ORB_GROK_STOP, () => {
+  orb.grokStop()
+  return { ok: true }
+})
+
+ipcMain.on(IPC.ORB_GROK_AUDIO, (_event, base64Pcm: unknown) => {
+  if (typeof base64Pcm === 'string' && base64Pcm) orb.grokAppendAudio(base64Pcm)
+})
+
+ipcMain.on(IPC.ORB_GROK_HOLD, (_event, active: unknown) => {
+  orb.grokSetHold(active === true)
+})
+
+// ─── Gemini Live voice (realtime backend) IPC ───
+// Channel-for-channel mirror of the Grok block above; the two enabled
+// toggles are kept mutually exclusive here so only one realtime backend can
+// ever claim the orb.
+
+function sendOrbGeminiConfig(): void {
+  if (!orbWindow || orbWindow.isDestroyed()) return
+  orbWindow.webContents.send(IPC.ORB_GEMINI_CONFIG, publicGeminiConfig())
+}
+
+ipcMain.handle(IPC.ORB_GEMINI_GET_CONFIG, () => {
+  return publicGeminiConfig()
+})
+
+ipcMain.handle(IPC.ORB_GEMINI_SET_CONFIG, async (_event, partial: unknown) => {
+  const p = (partial && typeof partial === 'object' ? partial : {}) as {
+    enabled?: unknown
+    apiKey?: unknown
+    voice?: unknown
+    screenShare?: unknown
+    pushToTalk?: unknown
+  }
+  if (p.voice !== undefined && (typeof p.voice !== 'string' || !isValidGeminiVoice(p.voice))) {
+    return { ok: false, error: `unknown gemini voice: ${String(p.voice).slice(0, 40)}` }
+  }
+  const before = getGeminiVoiceConfig()
+  const clean: {
+    enabled?: boolean
+    apiKey?: string
+    voice?: string
+    screenShare?: boolean
+    pushToTalk?: boolean
+  } = {}
+  if (typeof p.enabled === 'boolean') clean.enabled = p.enabled
+  if (typeof p.apiKey === 'string') clean.apiKey = p.apiKey
+  if (typeof p.voice === 'string') clean.voice = p.voice
+  if (typeof p.screenShare === 'boolean') clean.screenShare = p.screenShare
+  if (typeof p.pushToTalk === 'boolean') clean.pushToTalk = p.pushToTalk
+  const saved = saveGeminiVoiceConfig(clean)
+  const after = getGeminiVoiceConfig()
+  // One realtime backend at a time: switching Gemini on switches Grok off.
+  if (clean.enabled === true && getGrokVoiceConfig().enabled) {
+    saveGrokVoiceConfig({ enabled: false })
+    sendOrbGrokConfig()
+  }
+  // screenShare is deliberately NOT part of this: the live session reads it
+  // per frame tick, so the toggle works mid-conversation without a rebuild.
+  // pushToTalk IS: activity detection is setup-time config in the Live API.
+  const backendChanged =
+    before.enabled !== after.enabled ||
+    before.apiKey !== after.apiKey ||
+    before.voice !== after.voice ||
+    before.pushToTalk !== after.pushToTalk
+  if (backendChanged) {
+    try {
+      await orb.recreateSession()
+    } catch (err) {
+      log(`Gemini config: session recreate failed: ${(err as Error).message}`)
+    }
+  }
+  sendOrbGeminiConfig()
+  if (!saved) {
+    return {
+      ok: false,
+      config: publicGeminiConfig(),
+      error: 'settings applied for this session but could not be saved to disk',
+    }
+  }
+  return { ok: true, config: publicGeminiConfig() }
+})
+
+ipcMain.handle(IPC.ORB_GEMINI_START, async () => {
+  try {
+    return await orb.geminiStart()
+  } catch (err) {
+    return { ok: false, error: (err as Error).message }
+  }
+})
+
+ipcMain.handle(IPC.ORB_GEMINI_STOP, () => {
+  orb.geminiStop()
+  return { ok: true }
+})
+
+ipcMain.on(IPC.ORB_GEMINI_AUDIO, (_event, base64Pcm: unknown) => {
+  if (typeof base64Pcm === 'string' && base64Pcm) orb.geminiAppendAudio(base64Pcm)
+})
+
+ipcMain.on(IPC.ORB_GEMINI_HOLD, (_event, active: unknown) => {
+  orb.geminiSetHold(active === true)
 })
 
 // Renderer pushes its current voice state ('idle' | 'listening' | 'transcribing' |
@@ -3136,6 +3791,68 @@ ipcMain.on(IPC.DOCK_SET_POSITION, (_event, x: number, y: number) => {
 ipcMain.handle(IPC.ORB_TOGGLE_DOCK, () => {
   const visible = setDockVisible(undefined, 'user')
   return { ok: true, visible }
+})
+
+// ─── First-install tour IPC ───
+// The orb renderer owns the performance (script, card, sequencing); main
+// owns the once-per-machine truth in <userData>/orb-tour.json plus the one
+// step that needs main-process power: opening the Gemini key page.
+ipcMain.handle(IPC.ORB_TOUR_GET, () => {
+  const s = getTourState()
+  return { pending: !s.done, step: s.step }
+})
+
+ipcMain.on(IPC.ORB_TOUR_STEP, (_event, step: unknown) => {
+  if (typeof step === 'number') saveTourStep(step)
+})
+
+ipcMain.handle(IPC.ORB_TOUR_DONE, (_event, how: unknown) => {
+  completeTour(how === 'skipped' ? 'skipped' : 'finished')
+  return { ok: true }
+})
+
+// The tour's "I'm opening Google AI Studio for you" beat. Fixed URL — the
+// sandboxed orb renderer deliberately gets no open-any-URL capability.
+const GEMINI_KEYS_URL = 'https://aistudio.google.com/app/apikey'
+ipcMain.handle(IPC.ORB_TOUR_OPEN_KEYS, () => {
+  shell.openExternal(GEMINI_KEYS_URL).catch((err) =>
+    log(`[tour] failed to open ${GEMINI_KEYS_URL}: ${(err as Error).message}`),
+  )
+  return { ok: true }
+})
+
+// Whole-tour lifecycle: toggle caption suppression and clear any caption that
+// was already on screen so the bottom of the display is clean for the tour.
+ipcMain.on(IPC.ORB_TOUR_ACTIVE, (_event, active: unknown) => {
+  tourSuppressCaptions = (active as { active?: unknown })?.active === true
+  if (tourSuppressCaptions) sendToCaptionPill({ type: 'orb_dismissed' })
+})
+
+// Interactive gate relay (orb → pill). A non-null target makes the chat pill
+// visible + frontmost so the user can act on it, then forwards the cue; null
+// just clears the highlight.
+ipcMain.on(IPC.ORB_TOUR_CUE, (_event, payload: unknown) => {
+  const target = (payload as { target?: unknown } | null)?.target
+  const t = target === 'tabbar' || target === 'voicetab' ? target : null
+  if (t) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isVisible()) showWindow('tour-cue')
+      else mainWindow.moveTop()
+    } else {
+      createWindow()
+    }
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.TOUR_PILL_CUE, { target: t })
+  }
+})
+
+// Pill reports the gated action was performed → wake the orb's tour runner.
+ipcMain.on(IPC.TOUR_PILL_DONE, (_event, payload: unknown) => {
+  const target = (payload as { target?: unknown } | null)?.target
+  if (orbWindow && !orbWindow.isDestroyed()) {
+    orbWindow.webContents.send(IPC.ORB_TOUR_PILL_DONE, { target })
+  }
 })
 
 // Renderer finished its quiet-grace slide-out — hide without touching
@@ -3574,6 +4291,11 @@ app.whenReady().then(async () => {
     await raxAuth.setEnabled(false)
   }
 
+  // Warm the balance cache for the $0 spawn backstop (applyBalanceGate) so a
+  // zero-credit user is gated from the very first spawn, before any renderer
+  // has had a chance to poll. Non-blocking; failure just means fail-open.
+  void raxAuth.fetchAccount().catch(() => {})
+
   // Decide whether to launch into the pill directly or into the welcome
   // window. We defer creating the pill at all until onboarding is done —
   // that way a brand-new user sees ONLY the welcome until they finish
@@ -3586,8 +4308,12 @@ app.whenReady().then(async () => {
   } else {
     createWindow()
     snapshotWindowState('after createWindow')
-    // Dock is no longer an ambient surface — it's slaved to the orb's
-    // visibility (see showOrbWindow / hideOrbWindow). Nothing to create here.
+    // The notch is the ambient default surface — it comes up with the app,
+    // and ⇧⌘O hides/summons it. The dock rides along with it (slaved to orb
+    // visibility, see showOrbWindow / hideOrbWindow). Boot leads with the
+    // short 'glance' cameo: the mascot spawns, takes a good look at the
+    // screen for a few seconds, then leaps into the bar.
+    void summonOrbWithIntro('glance')
   }
 
   if (SPACES_DEBUG) {
@@ -3644,6 +4370,31 @@ app.whenReady().then(async () => {
     reassertDockVisibility('browser-window-focus')
   })
 
+  // Heartbeat re-assert. Electron exposes no "active Space changed" event,
+  // yet Space switches / Mission Control / fullscreen transitions are exactly
+  // when the window server drops a panel's join-all-Spaces behavior — leaving
+  // the notch/dock stranded on the desktop it was last summoned on, invisible
+  // on every other Space. The event-driven re-asserts above can't see that
+  // happen, so a low-frequency timer patches the gap. Each call NOOPs when
+  // state already matches, so a tick is just a few cheap setters.
+  setInterval(() => {
+    reassertOrbVisibility('heartbeat')
+    reassertDockVisibility('heartbeat')
+    if (captionPillWindow && !captionPillWindow.isDestroyed()) {
+      try {
+        captionPillWindow.setVisibleOnAllWorkspaces(true, {
+          visibleOnFullScreen: true,
+          skipTransformProcessType: true,
+        })
+        captionPillWindow.setAlwaysOnTop(true, 'status', 1)
+        if (!applyStationaryOverlay(captionPillWindow)) {
+          captionPillWindow.setHiddenInMissionControl(true)
+        }
+        pinOverlayToSpace(captionPillWindow)
+      } catch {}
+    }
+  }, 2500)
+
 
   // Primary: Option+Space (2 keys, doesn't conflict with shell)
   // Fallback: Cmd+Shift+K kept as secondary shortcut
@@ -3654,9 +4405,11 @@ app.whenReady().then(async () => {
   globalShortcut.register('CommandOrControl+Shift+K', () => toggleWindow('shortcut Cmd/Ctrl+Shift+K'))
   // Fullscreen window — Cmd+Shift+F
   globalShortcut.register('CommandOrControl+Shift+F', () => toggleFullscreenWindow())
-  // Voice orb — Cmd+Shift+O (Siri-style summon). The dock rides along with
-  // the orb (see showOrbWindow / hideOrbWindow), so there's no separate dock
-  // shortcut anymore — toggling the orb toggles the dock.
+  // Voice orb — Cmd+Shift+O. The notch is shown by default at launch, so in
+  // practice this is the "hide it / bring it back" shortcut (surfaced in the
+  // notch settings panel). The dock rides along with the orb (see
+  // showOrbWindow / hideOrbWindow), so there's no separate dock shortcut —
+  // toggling the orb toggles the dock.
   globalShortcut.register('CommandOrControl+Shift+O', () => toggleOrbWindow())
   // Push-to-talk: summon the orb (if hidden) AND immediately start listening.
   // We mark the intent and let the renderer flush it once it has wired its
@@ -3676,7 +4429,10 @@ app.whenReady().then(async () => {
       showOrbWindow()
       flushPendingForceListen()
     } else {
-      // Already visible — flush immediately.
+      // Already visible — flush immediately. A pending dismissal
+      // contraction must be rescued first or the window would hide out
+      // from under the listen 240ms from now.
+      if (orbHideTimer) showOrbWindow()
       flushPendingForceListen()
     }
   })
@@ -3706,18 +4462,18 @@ app.whenReady().then(async () => {
     if (channel === IPC.UPDATER_STATUS) {
       try { rebuildTrayMenu() } catch {}
     }
-  })
+  }, () => createUpdateWindow())
   trayContextMenuFactory = () => {
     const updaterStatus = updaterGetStatus()
     const updaterLabel = (() => {
       switch (updaterStatus.phase) {
         case 'checking': return 'Checking for Updates…'
-        case 'available': return `Download Rax v${updaterStatus.availableVersion}…`
+        case 'available': return `Update Available: Rax v${updaterStatus.availableVersion}…`
         case 'downloading': {
           const pct = Math.round(updaterStatus.downloadPercent ?? 0)
-          return `Downloading update… ${pct}%`
+          return `Downloading Update… ${pct}%`
         }
-        case 'downloaded': return `Restart to Install v${updaterStatus.availableVersion}`
+        case 'downloaded': return `Update Ready: Install v${updaterStatus.availableVersion}…`
         case 'unsupported': return 'Check for Updates (unavailable)'
         default: return 'Check for Updates…'
       }
@@ -3737,15 +4493,13 @@ app.whenReady().then(async () => {
       { type: 'separator' },
       {
         label: updaterLabel,
-        enabled: updaterStatus.phase !== 'unsupported' && updaterStatus.phase !== 'checking' && updaterStatus.phase !== 'downloading',
+        enabled: updaterStatus.phase !== 'unsupported',
         click: () => {
-          if (updaterStatus.phase === 'downloaded') {
-            updaterInstall()
-          } else if (updaterStatus.phase === 'available') {
-            void updaterDownload()
-          } else {
-            void updaterCheck({ userInitiated: true })
-          }
+          // The Software Update window owns the whole flow: it kicks off a
+          // check when idle, shows release notes + download when available,
+          // live progress while downloading, and the restart prompt at the
+          // end. The tray just opens it.
+          createUpdateWindow()
         },
       },
       // Permissions row — shows a checkmark when Accessibility is granted
@@ -3795,6 +4549,30 @@ app.on('will-quit', () => {
   codeMode.shutdown()
   flushLogs()
 })
+
+// Dev-only regression harness for the update-install quit path. The native
+// Squirrel.Mac quitAndInstall closes every window BEFORE app.quit(), so a
+// hide-on-close guard can deadlock the install. Run with
+//   RAX_TEST_INSTALL_QUIT=fixed → strip guards first (must print PASS, exit 0)
+//   RAX_TEST_INSTALL_QUIT=raw   → raw Squirrel sequence (hang detector exits 7)
+if (!app.isPackaged && process.env.RAX_TEST_INSTALL_QUIT) {
+  const mode = process.env.RAX_TEST_INSTALL_QUIT
+  setTimeout(() => {
+    console.log(`[install-quit-test] simulating Squirrel close sequence (mode=${mode})`)
+    if (mode === 'fixed') prepareWindowsForUpdateInstall()
+    for (const w of BrowserWindow.getAllWindows()) w.close()
+    setTimeout(() => {
+      const alive = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed())
+      if (alive.length > 0) {
+        console.error(`[install-quit-test] HANG: ${alive.length} window(s) refused to close — quitAndInstall would deadlock`)
+        app.exit(7)
+      } else {
+        console.log('[install-quit-test] PASS: all windows closed — quitAndInstall would proceed')
+        app.quit()
+      }
+    }, 1500)
+  }, 10_000)
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef } from 'react'
 import { useReducedMotion } from 'framer-motion'
 import { getMascotColorway } from '../../shared/mascot-colors'
-import type { TtsEnvelopeFrames, VoiceState } from './Notch'
+import type { MascotEntrance, TtsEnvelopeFrames, VoiceState } from './Notch'
 
 // ─── Rax mascot ───
 //
@@ -10,6 +10,15 @@ import type { TtsEnvelopeFrames, VoiceState } from './Notch'
 // two round white eyes inside the band, a stub of neck below. He lives in the
 // right wing, beside the hardware notch, and he is ALIVE:
 //
+//   · entrance     when the notch window appears he waits for the bar to
+//                  slide in, then hops off the hardware-notch side and dives
+//                  in — a scripted ballistic fall whose backflip COMPLETES at
+//                  touchdown, handing real impact velocity to the springs:
+//                  deep squash, one rebound, a balance wobble, and the bar
+//                  itself dips under him (onEntranceImpact) ('tumble'); when
+//                  the intro cameo precedes the notch (see renderer/intro),
+//                  the seat stays empty ('hold') until the big mascot flies
+//                  in behind the bar and this one thuds in as him ('land')
 //   · idle         breathes, blinks, glances around, follows your cursor when
 //                  it wanders into the strip; dozes off after a long while
 //   · hover        perks up — a little hop, wide eyes locked on the cursor
@@ -47,6 +56,23 @@ interface MascotProps {
   /** Visor colorway id (shared/mascot-colors.ts) — Rax blue or a crew skin.
    *  Unknown/absent ids fall back to Rax blue. */
   colorId?: string
+  /** Entrance choreography for the notch window appearing. Each new `at`
+   *  value plays its `kind`:
+   *    · tumble — hold off-screen while the bar slides in, then a scripted
+   *      ballistic dive (early tucked backflip, straighten, THUD: deep
+   *      squash + wobble + bar dip), then double-blink, visor glint
+   *    · hold   — park off-screen indefinitely (the intro cameo's big
+   *      mascot is mid-flight in another window; this seat stays empty)
+   *    · land   — thud in NOW with flight momentum (the cameo mascot just
+   *      flew in behind the bar and "became" this one)
+   *  See Notch.tsx for who decides which kind plays. */
+  entrance?: MascotEntrance | null
+  /** Fired the frame an entrance touches down — Notch nudges the whole bar
+   *  down a couple px so the landing reads as a real impact. */
+  onEntranceImpact?: () => void
+  /** Rendered size in px (the SVG scales losslessly). The notch seat is 34;
+   *  the intro cameo renders him big (≈140) center-screen. */
+  size?: number
 }
 
 // ─── Geometry (one 72×72 viewBox space; rendered at 34px) ───
@@ -87,6 +113,17 @@ const TTS_OUTPUT_LATENCY_MS = 80
 // Doze: after this long idle with no cursor/hover/state activity he nods off —
 // half-lidded, gaze sinking, slow deep breaths, the occasional head-bob dip.
 const DOZE_AFTER_MS = 75_000
+
+// ─── Tumble entrance script ───
+// Keyframed action, simulated settle: the fall + flip are scripted (so the
+// backflip COMPLETES at touchdown instead of unwinding through it — a spring
+// alone lands mid-spin and tips past upright), then the springs take over
+// with injected impact state for the squash-rebound-wobble.
+const TUMBLE_BAR_LEAD_MS = 300 // bar slide (~0.42s, 95% settled) goes first
+const TUMBLE_FLIGHT_MS = 250
+const TUMBLE_X0 = -30 // hops in from the hardware-notch side…
+const TUMBLE_Y0 = -78 // …well above the shell's clip edge
+const HOLD_Y = -96 // cameo hold: parked deep off-stage, upright
 
 // ─── Tiny damped spring ───
 // Semi-implicit Euler; ω = response speed (rad/s), ζ = damping ratio. ζ < 1
@@ -141,7 +178,7 @@ function blinkMul(elapsed: number): number {
   return e * (1 + 0.08 * Math.sin(t * Math.PI))
 }
 
-export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, colorId }: MascotProps) {
+export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, colorId, entrance, onEntranceImpact, size = 34 }: MascotProps) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const rootRef = useRef<SVGGElement | null>(null)
   const squashRef = useRef<SVGGElement | null>(null)
@@ -159,8 +196,8 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
   // Props + reduced-motion mirrored into a ref so the mount-once rAF loop
   // reads fresh values without re-subscribing — springs and schedulers must
   // survive every state flip, or the motion would reset mid-gesture.
-  const propsRef = useRef({ state, hovered, stoppable, analyser, envelopeRef, reducedMotion, colorId })
-  propsRef.current = { state, hovered, stoppable, analyser, envelopeRef, reducedMotion, colorId }
+  const propsRef = useRef({ state, hovered, stoppable, analyser, envelopeRef, reducedMotion, colorId, entrance, onEntranceImpact })
+  propsRef.current = { state, hovered, stoppable, analyser, envelopeRef, reducedMotion, colorId, entrance, onEntranceImpact }
 
   useEffect(() => {
     const svg = svgRef.current
@@ -184,7 +221,7 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
     // underdamped so saccades land with the real eye's tiny overshoot.
     const sp = {
       x: new Spring(0, 14, 0.85),
-      y: new Spring(-44, 16, 0.55), // starts above the bar — mount = drop-in
+      y: new Spring(HOLD_Y, 16, 0.55), // starts parked off-stage — mount = entrance
       rot: new Spring(0, 16, 0.6),
       sx: new Spring(1, 26, 0.55),
       sy: new Spring(1, 26, 0.55),
@@ -223,6 +260,12 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
       nextSquintAt: 0,
       squintUntil: 0,
       shakeAt: -1e9,
+      entranceKey: 0,
+      // Entrance program: 'hold' parks him off-stage (pose written directly,
+      // not via spring snaps — the old snap-then-step hack drifted ~7%/frame
+      // and could leak his feet into view on a slow frame); 'tumble' scripts
+      // the dive between release and impact.
+      ent: null as null | { kind: 'hold' | 'tumble'; release: number; impact: number; released: boolean },
       lastActiveAt: now0,
       nextDozeDipAt: 0,
       dozing: false,
@@ -260,6 +303,42 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
     window.addEventListener('mousedown', onDown)
 
     const data = { buf: null as Uint8Array<ArrayBuffer> | null }
+
+    // Touchdown: slam the springs into the impact pose and let them ring —
+    // deep squash with a rebound (sy overshoots into a stretch and settles),
+    // a few degrees of over-rotation wobbling upright, a sink-and-spring on
+    // y, plus the pleased double-blink + glint. 'land' carries the cameo's
+    // flight momentum, so it hits a touch harder. The bar dips in sympathy
+    // via onEntranceImpact.
+    const entranceImpact = (now: number, kind: 'tumble' | 'land') => {
+      if (kind === 'tumble') {
+        sp.y.x = 0
+        sp.y.v = 165
+        sp.rot.x = -7
+        sp.rot.v = -110
+        sp.sy.x = 0.66
+        sp.sy.v = 5 // deep pose + a push so the rebound overshoots ~1.06 tall
+        sp.sx.x = 1.27
+        sp.sx.v = -3.5
+        sp.x.x = 0
+        sp.x.v = 70 // a hint of skid — he arrives moving sideways
+      } else {
+        sp.y.x = -8
+        sp.y.v = 200
+        sp.rot.x = -6
+        sp.rot.v = -90
+        sp.sy.x = 0.64
+        sp.sy.v = 5
+        sp.sx.x = 1.3
+        sp.sx.v = -3.5
+      }
+      sp.wide.impulse(1.2)
+      B.blinkAt = now + 140
+      B.doubleBlinkAt = now + 140 + BLINK_TOTAL_MS + 125
+      B.glintAt = now + 290
+      B.nextGlintAt = now + rand(11_000, 26_000)
+      propsRef.current.onEntranceImpact?.()
+    }
 
     let raf = 0
     let last = now0
@@ -303,6 +382,32 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
           }
         }
       }
+
+      // ── Entrance: the notch just appeared (launch or ⇧⌘O summon) ──
+      // Three kinds (see MascotProps.entrance). 'tumble' and 'hold' arm the
+      // entrance program consumed in the spring-step section below; 'land'
+      // is an immediate impact (the cameo mascot just swooped in BEHIND the
+      // bar — a second arrival from above read as a double-landing, so he
+      // thuds in place with the flight's momentum instead).
+      if (p.entrance && p.entrance.at !== B.entranceKey) {
+        B.entranceKey = p.entrance.at
+        B.lastActiveAt = now
+        if (rm) {
+          B.ent = null
+        } else if (p.entrance.kind === 'tumble') {
+          const release = now + TUMBLE_BAR_LEAD_MS // bar first, mascot second
+          B.ent = { kind: 'tumble', release, impact: release + TUMBLE_FLIGHT_MS, released: false }
+        } else if (p.entrance.kind === 'hold') {
+          // The intro cameo's big mascot is mid-show in his own window —
+          // this seat stays empty until the 'land' push (or Notch's
+          // failsafe) releases it.
+          B.ent = { kind: 'hold', release: Infinity, impact: Infinity, released: false }
+        } else {
+          B.ent = null
+          entranceImpact(now, 'land')
+        }
+      }
+      if (B.ent && rm) B.ent = null // rm flipped mid-program: just appear
 
       // ── Hover enter: perk up ──
       if (p.hovered && !B.prevHovered && !rm) {
@@ -579,13 +684,52 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
         blink = blinkMul(now - B.blinkAt)
       }
 
+      // ── Entrance program: the script owns the body while parked/airborne ──
+      // Pose is computed analytically and the body springs are snapped to it
+      // (they mirror the script, so an interruption hands off seamlessly);
+      // eyes/lids/glow keep springing normally underneath. At u=1 the impact
+      // state is injected and the very same frame falls through to normal
+      // stepping — squash renders deep from frame one.
+      let entPose: { x: number; y: number; rot: number; sx: number; sy: number } | null = null
+      if (B.ent) {
+        const ent = B.ent
+        if (now < ent.release) {
+          entPose =
+            ent.kind === 'tumble'
+              ? { x: TUMBLE_X0, y: TUMBLE_Y0, rot: -360, sx: 1, sy: 1 }
+              : { x: 0, y: HOLD_Y, rot: 0, sx: 1, sy: 1 }
+        } else {
+          if (!ent.released) {
+            ent.released = true
+            sp.wide.impulse(2) // eyes pop — "here we GO"
+          }
+          const u = Math.min(1, (now - ent.release) / TUMBLE_FLIGHT_MS)
+          if (u >= 1) {
+            B.ent = null
+            entranceImpact(now, 'tumble')
+          } else {
+            // Ballistic fall (accelerating, like gravity — a spring's
+            // ease-out read as floaty), drifting in from the notch side;
+            // the flip front-loads (tucked turn at the top, straighten for
+            // the dive); stretch grows with fall speed.
+            entPose = {
+              x: TUMBLE_X0 * (1 - u),
+              y: TUMBLE_Y0 * (1 - u * u),
+              rot: -360 * Math.pow(1 - u, 1.4),
+              sx: 1 - 0.17 * u * u,
+              sy: 1 + 0.3 * u * u,
+            }
+          }
+        }
+      }
+
       // ── Step springs (reduced motion: snap straight to pose) ──
       const stepOf = (s: Spring, target: number) => (rm ? s.snap(target) : s.step(target, dt))
-      const x = stepOf(sp.x, tx)
-      let y = stepOf(sp.y, ty)
-      let rot = stepOf(sp.rot, trot)
-      let sxv = stepOf(sp.sx, 1)
-      let syv = stepOf(sp.sy, 1)
+      const x = entPose ? sp.x.snap(entPose.x) : stepOf(sp.x, tx)
+      let y = entPose ? sp.y.snap(entPose.y) : stepOf(sp.y, ty)
+      let rot = entPose ? sp.rot.snap(entPose.rot) : stepOf(sp.rot, trot)
+      let sxv = entPose ? sp.sx.snap(entPose.sx) : stepOf(sp.sx, 1)
+      let syv = entPose ? sp.sy.snap(entPose.sy) : stepOf(sp.sy, 1)
       const gx = stepOf(sp.gx, tgx)
       const gy = stepOf(sp.gy, tgy)
       const openV = stepOf(sp.open, topen)
@@ -598,8 +742,9 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
       const lean = stepOf(sp.lean, tlean)
 
       // Breathing + lean + speech squash-and-stretch, layered after the
-      // springs so they ride on top of whatever gesture is in flight.
-      if (!rm) {
+      // springs so they ride on top of whatever gesture is in flight —
+      // except mid-entrance: no breathing while parked or airborne.
+      if (!rm && !entPose) {
         const breath = Math.sin((now / (3400 + doze * 1400)) * Math.PI * 2) * breathAmp
         y += breath * 1.3
         syv *= 1 + breath * 0.011
@@ -693,8 +838,8 @@ export function Mascot({ state, hovered, stoppable, analyser, envelopeRef, color
       ref={svgRef}
       className={`notch-mascot ${state}`}
       viewBox="0 0 72 72"
-      width={34}
-      height={34}
+      width={size}
+      height={size}
       style={{ overflow: 'visible' }}
       aria-hidden
       focusable="false"

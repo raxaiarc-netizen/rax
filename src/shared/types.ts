@@ -249,6 +249,10 @@ export interface RunOptions {
   maxTurns?: number
   maxBudgetUsd?: number
   systemPrompt?: string
+  /** Extra text appended to the RAX system hint via --append-system-prompt.
+   *  Injected by ControlPlane for crew tabs: agent identity + voice-orb
+   *  contract (see buildCrewAgentHint in run-manager.ts). */
+  appendSystemPrompt?: string
   model?: string
   /** Claude CLI effort level (--effort). Omitted = CLI default. */
   effort?: EffortLevel
@@ -371,6 +375,12 @@ export interface SessionSnapshot {
 // main and renderer.
 export const DEFAULT_MODEL_ID = 'claude-opus-4-8'
 
+// "Rax Default" — the free tier model. The proxy forwards kimi-* upstream at
+// no charge, so this is the only model usable on a $0 Rax credit balance.
+// Shared between the renderer pickers (lock/auto-select at $0) and the main
+// process spawn-time backstop.
+export const RAX_DEFAULT_MODEL_ID = 'kimi-k2.7-code'
+
 // ─── Effort ───
 // Mirrors the Claude CLI's --effort flag (how hard the model thinks per turn).
 // `null` preference means "CLI default" — we omit --effort entirely so the
@@ -436,6 +446,7 @@ export const IPC = {
   HIDE_WINDOW: 'rax:hide-window',
   WINDOW_SHOWN: 'rax:window-shown',
   SET_IGNORE_MOUSE_EVENTS: 'rax:set-ignore-mouse-events',
+  ORB_SET_FOCUSABLE: 'rax:orb-set-focusable',
   START_WINDOW_DRAG: 'rax:start-window-drag',
   RESET_WINDOW_POSITION: 'rax:reset-window-position',
   IS_VISIBLE: 'rax:is-visible',
@@ -543,6 +554,27 @@ export const IPC = {
   /** Main→orb renderer push: `{ colorId }` for the mascot's visor. Sent on
    *  renderer-ready and whenever the Settings selection changes. */
   ORB_MASCOT_COLOR: 'rax:orb-mascot-color',
+  /** Renderer→main, fire-and-forget: the mascot's seat rect inside the orb
+   *  window (`{ x, y, width, height }`, window-relative DIPs, parked bar).
+   *  The intro cameo flies the big mascot to exactly this spot. Pushed on
+   *  mount, on display-profile changes, and on resize. */
+  ORB_MASCOT_SEAT: 'rax:orb-mascot-seat',
+  /** Main→orb renderer push: `{ kind: 'hold' | 'land' }` — entrance
+   *  choreography control around the intro cameo. 'hold' arms the notch
+   *  (bar slides in mascot-less, the little robot waits off-stage); 'land'
+   *  releases him into his seat (the intro mascot just flew in behind the
+   *  bar). Plain summons send nothing and the notch plays its default
+   *  tumble-in. */
+  ORB_ENTRANCE: 'rax:orb-entrance',
+  /** Intro cameo window (the center-screen mascot that analyzes your
+   *  desktop, then merges into the notch). ready: renderer mounted;
+   *  play: main→intro payload {seat, display, colorId}; bar-cue: intro→main
+   *  "start the bar slide NOW" (fired at leap wind-up); done: intro→main
+   *  "touched down behind the bar". */
+  INTRO_READY: 'rax:intro-ready',
+  INTRO_PLAY: 'rax:intro-play',
+  INTRO_BAR_CUE: 'rax:intro-bar-cue',
+  INTRO_DONE: 'rax:intro-done',
   ORB_RENDERER_READY: 'rax:orb-renderer-ready',
   ORB_BUSY: 'rax:orb-busy',
   /** Renderer→main, fire-and-forget. Payload is the orb's current voice
@@ -651,15 +683,136 @@ export const IPC = {
    *  button reflects truth no matter who flipped it. */
   ORB_DOCK_VISIBLE: 'rax:orb-dock-visible',
 
+  // ─── First-install guided tour ───
+  // A fully scripted (no LLM) voice walkthrough the orb performs the first
+  // time the notch appears: spoken via the local Kokoro TTS with a guidance
+  // card under the bar. State lives in <userData>/orb-tour.json so the tour
+  // plays once per machine and can resume mid-way after an interruption.
+  /** Renderer (orb) → main invoke, no payload. Returns
+   *  `{ pending, step }` — whether the tour still owes the user a
+   *  performance and which step to resume from. */
+  ORB_TOUR_GET: 'rax:orb-tour-get',
+  /** Renderer (orb) → main, fire-and-forget. Payload is the step index the
+   *  tour just reached — persisted so a quit/dismiss mid-tour resumes there
+   *  instead of replaying from the top. */
+  ORB_TOUR_STEP: 'rax:orb-tour-step',
+  /** Renderer (orb) → main invoke. Payload `'finished' | 'skipped'`.
+   *  Marks the tour done forever (both outcomes count — a skip is an
+   *  answer, not a deferral). */
+  ORB_TOUR_DONE: 'rax:orb-tour-done',
+  /** Renderer (orb) → main invoke, no payload. Opens the Google AI Studio
+   *  API-key page in the default browser — the tour's "I'm opening Google
+   *  AI Studio for you" beat. Fixed URL on the main side; the sandboxed
+   *  orb renderer never gets a general open-any-URL capability. */
+  ORB_TOUR_OPEN_KEYS: 'rax:orb-tour-open-keys',
+  /** Renderer (orb) → main, fire-and-forget `{ active }`. Brackets the whole
+   *  tour: while active main suppresses caption-pill forwarding (the tour's
+   *  own card carries the words — no bottom subtitles) and hides the pill. */
+  ORB_TOUR_ACTIVE: 'rax:orb-tour-active',
+  /** Renderer (orb) → main `{ target: 'tabbar' | 'voicetab' | null }`. The
+   *  interactive gate's cross-window reach: main makes the chat pill visible
+   *  and relays the cue so the pill can pulse the real element and report
+   *  when the user actually does the thing. null clears the highlight. */
+  ORB_TOUR_CUE: 'rax:orb-tour-cue',
+  /** Main → pill renderer `{ target: 'tabbar' | 'voicetab' | null }` — the
+   *  relayed ORB_TOUR_CUE. The pill pulses the matching element and watches
+   *  for the gesture (expand / select the Voice tab). */
+  TOUR_PILL_CUE: 'rax:tour-pill-cue',
+  /** Pill renderer → main `{ target }` — the user performed the gated action
+   *  (expanded the pill / selected the Voice tab). Main relays to the orb. */
+  TOUR_PILL_DONE: 'rax:tour-pill-done',
+  /** Main → orb renderer `{ target }` — the relayed TOUR_PILL_DONE; the tour
+   *  resolves the step's gate and moves on. */
+  ORB_TOUR_PILL_DONE: 'rax:orb-tour-pill-done',
+
+  // ─── Grok voice (realtime speech-to-speech backend) ───
+  // Opt-in alternative to the whisper → claude → Kokoro pipeline, flipped
+  // from the notch settings. Main owns the config (<userData>/grok-voice.json,
+  // includes the user's xAI key — never shipped to the renderer) and the
+  // WebSocket session; the renderer owns the mic capture + PCM playback.
+  /** Renderer→main invoke, no payload. Returns the public config
+   *  `{ enabled, voice, hasKey, keyTail }`. */
+  ORB_GROK_GET_CONFIG: 'rax:orb-grok-get-config',
+  /** Renderer→main invoke. Partial `{ enabled?, apiKey?, voice? }` merge-
+   *  write. Returns `{ ok, config }` (public shape). Flipping `enabled`
+   *  rebuilds the orb backend on the spot. */
+  ORB_GROK_SET_CONFIG: 'rax:orb-grok-set-config',
+  /** Main → orb renderer push: public config, sent on renderer-ready and
+   *  after every ORB_GROK_SET_CONFIG so the notch settings stay in sync. */
+  ORB_GROK_CONFIG: 'rax:orb-grok-config',
+  /** Renderer→main invoke, no payload. Opens the realtime WebSocket session.
+   *  Returns `{ ok, error? }`. */
+  ORB_GROK_START: 'rax:orb-grok-start',
+  /** Renderer→main invoke, no payload. Closes the realtime session. */
+  ORB_GROK_STOP: 'rax:orb-grok-stop',
+  /** Renderer→main, fire-and-forget. Base64 PCM16 mono 24kHz mic chunk for
+   *  the live realtime session (sent ~16×/sec while a session is open). */
+  ORB_GROK_AUDIO: 'rax:orb-grok-audio',
+  /** Renderer→main, fire-and-forget. Boolean: ⌥R hold edge for push-to-talk
+   *  mode (true = key down, false = released → commit the turn). No-op when
+   *  the live session wasn't opened with pushToTalk on. */
+  ORB_GROK_HOLD: 'rax:orb-grok-hold',
+  /** Main → orb renderer push: realtime session events — ready /
+   *  speech_started / speech_stopped / user_transcript / response_started /
+   *  audio (base64 PCM16 delta) / text (transcript delta + start_time) /
+   *  tool_call / response_done / error / closed. Drives the renderer's
+   *  playback + caption + state machine in Grok mode. */
+  ORB_GROK_EVENT: 'rax:orb-grok-event',
+  /** Renderer (orb) → main, fire-and-forget. Caption traffic for the bottom
+   *  pill, authored in the renderer where the audio playback clock lives:
+   *  `{ kind:'segment', segment }` (pill tts_segment shape) or
+   *  `{ kind:'clear', id }`. Main forwards to the caption-pill window. */
+  ORB_GROK_CAPTION: 'rax:orb-grok-caption',
+
+  // ─── Gemini Live voice (realtime speech-to-speech backend) ───
+  // Second realtime backend, mirroring the ORB_GROK_* surface one-for-one:
+  // Google's Live API replaces the local pipeline when enabled (mutually
+  // exclusive with the Grok toggle — main enforces it). Main owns the config
+  // (<userData>/gemini-voice.json, includes the user's Google AI key — never
+  // shipped to the renderer) and the WebSocket session; the renderer owns
+  // mic capture + PCM playback through the same realtime voice client.
+  /** Renderer→main invoke, no payload. Returns the public config
+   *  `{ enabled, voice, hasKey, keyTail }`. */
+  ORB_GEMINI_GET_CONFIG: 'rax:orb-gemini-get-config',
+  /** Renderer→main invoke. Partial `{ enabled?, apiKey?, voice? }` merge-
+   *  write. Returns `{ ok, config }` (public shape). Flipping `enabled`
+   *  rebuilds the orb backend on the spot (and switches Grok off). */
+  ORB_GEMINI_SET_CONFIG: 'rax:orb-gemini-set-config',
+  /** Main → orb renderer push: public config, sent on renderer-ready and
+   *  after every config change so the notch settings stay in sync. */
+  ORB_GEMINI_CONFIG: 'rax:orb-gemini-config',
+  /** Renderer→main invoke, no payload. Opens the realtime WebSocket session.
+   *  Returns `{ ok, error? }`. */
+  ORB_GEMINI_START: 'rax:orb-gemini-start',
+  /** Renderer→main invoke, no payload. Closes the realtime session. */
+  ORB_GEMINI_STOP: 'rax:orb-gemini-stop',
+  /** Renderer→main, fire-and-forget. Base64 PCM16 mono 24kHz mic chunk for
+   *  the live realtime session (sent ~16×/sec while a session is open). */
+  ORB_GEMINI_AUDIO: 'rax:orb-gemini-audio',
+  /** Renderer→main, fire-and-forget. Same ⌥R hold-edge contract as
+   *  ORB_GROK_HOLD, for Gemini-mode push-to-talk sessions. */
+  ORB_GEMINI_HOLD: 'rax:orb-gemini-hold',
+  /** Main → orb renderer push: realtime session events in the same shape as
+   *  ORB_GROK_EVENT (the renderer client is shared between the backends). */
+  ORB_GEMINI_EVENT: 'rax:orb-gemini-event',
+  /** Renderer (orb) → main, fire-and-forget. Same caption contract as
+   *  ORB_GROK_CAPTION, for Gemini-mode sessions. */
+  ORB_GEMINI_CAPTION: 'rax:orb-gemini-caption',
+
   // ─── Auto-updater ───
   // Backed by `electron-updater` reading `latest-mac.yml` from the GitHub
   // release configured in package.json `build.publish`. The renderer drives
   // checks from the Settings "About" panel; the main process also runs a
   // silent background check shortly after boot + every 6 hours.
   /** Renderer→main invoke. Triggers a check; returns the new status snapshot.
-   *  Payload `{ userInitiated: true }` makes failures + "up to date" surface
-   *  as native dialogs; background checks pass `false` and stay silent. */
+   *  Payload `{ userInitiated: true }` opens the Software Update window when
+   *  an update is found; background checks pass `false` and stay silent
+   *  (auto-download, then the window appears only when ready to install). */
   UPDATER_CHECK: 'rax:updater-check',
+  /** Renderer→main invoke. Opens (or focuses) the dedicated Software Update
+   *  window. The window renders the live UpdaterStatus and drives
+   *  download/install itself. */
+  UPDATER_OPEN_WINDOW: 'rax:updater-open-window',
   /** Renderer→main invoke. Starts downloading the available update. No-op
    *  if no update is currently available. */
   UPDATER_DOWNLOAD: 'rax:updater-download',

@@ -70,9 +70,24 @@ export class OrbRpcServer {
    * Retina + downscaled screenshot causes clicks to land at the wrong spot.
    */
   private lastCalibration: CaptureCalibration | null = null
+  /**
+   * Calibration of the most recent screen-share STREAM frame (pushed by the
+   * Gemini session per frame). Kept separate from lastCalibration on
+   * purpose: pixel coordinates always resolve against the screenshot the
+   * model read them from, while `unit:"norm1000"` coordinates (scale-free,
+   * read off the live stream) resolve against the latest streamed frame —
+   * mixing the two caches would mis-scale clicks whenever a stream frame
+   * landed between a screenshot and its click.
+   */
+  private streamCalibration: CaptureCalibration | null = null
 
   constructor(deps: OrbRpcDeps) {
     this.deps = deps
+  }
+
+  /** Live screen-share frames register their geometry here (null on stop). */
+  setStreamCalibration(cal: CaptureCalibration | null): void {
+    this.streamCalibration = cal
   }
 
   async start(): Promise<OrbRpcInfo> {
@@ -283,20 +298,24 @@ export class OrbRpcServer {
 
   private async _sendToTab(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const ref = String(args.tab ?? args.tabId ?? '').trim()
-    const prompt = String(args.prompt ?? '').trim()
-    if (!prompt) return { error: 'missing_prompt' }
+    const rawPrompt = String(args.prompt ?? '').trim()
+    if (!rawPrompt) return { error: 'missing_prompt' }
 
     const snap = this.deps.tabContext.resolve(ref)
     if (!snap) return { error: 'tab_not_found', reference: ref }
 
     const cwd = snap.workingDirectory || this.deps.getProjectPath()
+    const prompt = wrapOrbDispatch(rawPrompt, cwd)
 
+    // Mirror the UNwrapped prompt — the dock transcript, <rax_crew> snapshots
+    // and agent-update recaps all quote it; the <orb_dispatch> envelope is for
+    // the agent only.
     const messageId = randomUUID()
     this.deps.broadcastMirror({
       kind: 'user-message',
       tabId: snap.tabId,
       messageId,
-      content: prompt,
+      content: rawPrompt,
       timestamp: Date.now(),
     })
 
@@ -315,20 +334,22 @@ export class OrbRpcServer {
 
   private async _sendToTabAndWait(args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const ref = String(args.tab ?? args.tabId ?? '').trim()
-    const prompt = String(args.prompt ?? '').trim()
-    if (!prompt) return { error: 'missing_prompt' }
+    const rawPrompt = String(args.prompt ?? '').trim()
+    if (!rawPrompt) return { error: 'missing_prompt' }
 
     const snap = this.deps.tabContext.resolve(ref)
     if (!snap) return { error: 'tab_not_found', reference: ref }
 
     const cwd = snap.workingDirectory || this.deps.getProjectPath()
+    const prompt = wrapOrbDispatch(rawPrompt, cwd)
 
+    // Mirror the UNwrapped prompt (see _sendToTab).
     const messageId = randomUUID()
     this.deps.broadcastMirror({
       kind: 'user-message',
       tabId: snap.tabId,
       messageId,
-      content: prompt,
+      content: rawPrompt,
       timestamp: Date.now(),
     })
 
@@ -439,35 +460,33 @@ export class OrbRpcServer {
     try {
       switch (action) {
         case 'click': {
-          const x = clampInt(args.x, 0, 100_000, -1)
-          const y = clampInt(args.y, 0, 100_000, -1)
-          if (x < 0 || y < 0) return { error: 'missing_coords' }
+          const target = this._resolveClickTarget(args)
+          if ('error' in target) return target
           const button = args.button === 'right' ? 'right' : 'left'
-          const pt = this._imagePxToGlobalPt(x, y)
-          await runMouseEvent({ kind: 'click', x: pt.x, y: pt.y, button, clicks: 1 })
+          await runMouseEvent({ kind: 'click', x: target.pt.x, y: target.pt.y, button, clicks: 1 })
           return {
             ok: true,
             action: 'click',
-            x,
-            y,
+            x: target.x,
+            y: target.y,
+            unit: target.unit,
             button,
-            globalPoint: { x: pt.x, y: pt.y },
-            calibrated: pt.calibrated,
+            globalPoint: { x: target.pt.x, y: target.pt.y },
+            calibrated: target.pt.calibrated,
           }
         }
         case 'double_click': {
-          const x = clampInt(args.x, 0, 100_000, -1)
-          const y = clampInt(args.y, 0, 100_000, -1)
-          if (x < 0 || y < 0) return { error: 'missing_coords' }
-          const pt = this._imagePxToGlobalPt(x, y)
-          await runMouseEvent({ kind: 'click', x: pt.x, y: pt.y, button: 'left', clicks: 2 })
+          const target = this._resolveClickTarget(args)
+          if ('error' in target) return target
+          await runMouseEvent({ kind: 'click', x: target.pt.x, y: target.pt.y, button: 'left', clicks: 2 })
           return {
             ok: true,
             action: 'double_click',
-            x,
-            y,
-            globalPoint: { x: pt.x, y: pt.y },
-            calibrated: pt.calibrated,
+            x: target.x,
+            y: target.y,
+            unit: target.unit,
+            globalPoint: { x: target.pt.x, y: target.pt.y },
+            calibrated: target.pt.calibrated,
           }
         }
         case 'type': {
@@ -555,7 +574,50 @@ export class OrbRpcServer {
   }
 
   /**
-   * Translate an image-pixel coordinate from the most recent screenshot into
+   * Resolve click/double_click x,y into a global point, honoring the
+   * coordinate unit:
+   *   - 'px' (default): image-pixel coords of the most recent rax_screenshot
+   *     — the classic flow, translated via lastCalibration.
+   *   - 'norm1000': scale-free 0-1000 proportions of the latest screen-share
+   *     STREAM frame (Gemini share mode reads targets off live frames whose
+   *     exact pixel size the model never learns). Resolved against
+   *     streamCalibration, falling back to the screenshot calibration.
+   *
+   * An explicit `calibration` object in the args (injected by the realtime
+   * sessions' grounded-click path, never by the model) pins the mapping to
+   * the EXACT capture the coordinates were read from — immune to the shared
+   * caches being overwritten by a concurrent stream frame or going stale
+   * across backend switches.
+   */
+  private _resolveClickTarget(
+    args: Record<string, unknown>,
+  ): { x: number; y: number; unit: 'px' | 'norm1000'; pt: { x: number; y: number; calibrated: boolean } } | { error: string; message?: string } {
+    const unit = args.unit === 'norm1000' ? 'norm1000' : 'px'
+    const calOverride = parseCalibration(args.calibration)
+    if (unit === 'norm1000') {
+      const nx = clampInt(args.x, 0, 1000, -1)
+      const ny = clampInt(args.y, 0, 1000, -1)
+      if (nx < 0 || ny < 0) return { error: 'missing_coords' }
+      const cal = calOverride ?? this.streamCalibration ?? this.lastCalibration
+      if (!cal) {
+        return {
+          error: 'no_calibration',
+          message:
+            'No screen frame has been captured yet — norm1000 coordinates need a live screen-share frame or a rax_screenshot first.',
+        }
+      }
+      const px = Math.round((nx / 1000) * cal.imageOutWidth)
+      const py = Math.round((ny / 1000) * cal.imageOutHeight)
+      return { x: nx, y: ny, unit, pt: this._imagePxToGlobalPt(px, py, cal) }
+    }
+    const x = clampInt(args.x, 0, 100_000, -1)
+    const y = clampInt(args.y, 0, 100_000, -1)
+    if (x < 0 || y < 0) return { error: 'missing_coords' }
+    return { x, y, unit, pt: this._imagePxToGlobalPt(x, y, calOverride ?? this.lastCalibration) }
+  }
+
+  /**
+   * Translate an image-pixel coordinate from a capture's calibration into
    * a global display-point coordinate suitable for CGEventPost.
    *
    * When there is no cached calibration (no screenshot has been taken in this
@@ -564,8 +626,11 @@ export class OrbRpcServer {
    * non-Retina-no-downscale case. Mark `calibrated=false` so the caller can
    * surface this to the model in the response.
    */
-  private _imagePxToGlobalPt(x: number, y: number): { x: number; y: number; calibrated: boolean } {
-    const cal = this.lastCalibration
+  private _imagePxToGlobalPt(
+    x: number,
+    y: number,
+    cal: CaptureCalibration | null = this.lastCalibration,
+  ): { x: number; y: number; calibrated: boolean } {
     if (!cal) return { x, y, calibrated: false }
     const sxX = cal.displayPointWidth / cal.imageOutWidth
     const sxY = cal.displayPointHeight / cal.imageOutHeight
@@ -638,6 +703,41 @@ function clampInt(v: unknown, min: number, max: number, fallback: number): numbe
   const n = typeof v === 'number' ? v : Number.parseInt(String(v ?? ''), 10)
   if (!Number.isFinite(n)) return fallback
   return Math.max(min, Math.min(max, Math.trunc(n)))
+}
+
+/**
+ * Validate a caller-supplied CaptureCalibration (the grounded-click paths
+ * forward the calibration of the exact screenshot they searched). Returns
+ * null unless every geometric field is a usable finite number — a malformed
+ * object must fall back to the caches, not produce NaN click coordinates.
+ */
+function parseCalibration(v: unknown): CaptureCalibration | null {
+  if (!v || typeof v !== 'object') return null
+  const o = v as Record<string, unknown>
+  const nums = [
+    'sourcePxWidth', 'sourcePxHeight', 'imageOutWidth', 'imageOutHeight',
+    'displayPointWidth', 'displayPointHeight', 'displayOriginX', 'displayOriginY',
+  ] as const
+  for (const k of nums) {
+    const n = o[k]
+    if (typeof n !== 'number' || !Number.isFinite(n)) return null
+  }
+  if ((o.imageOutWidth as number) <= 0 || (o.imageOutHeight as number) <= 0) return null
+  if ((o.displayPointWidth as number) <= 0 || (o.displayPointHeight as number) <= 0) return null
+  return {
+    capturedDisplayIndex: typeof o.capturedDisplayIndex === 'number' ? o.capturedDisplayIndex : 1,
+    sourcePxWidth: o.sourcePxWidth as number,
+    sourcePxHeight: o.sourcePxHeight as number,
+    imageOutWidth: o.imageOutWidth as number,
+    imageOutHeight: o.imageOutHeight as number,
+    displayPointWidth: o.displayPointWidth as number,
+    displayPointHeight: o.displayPointHeight as number,
+    displayOriginX: o.displayOriginX as number,
+    displayOriginY: o.displayOriginY as number,
+    backingScaleFactor: typeof o.backingScaleFactor === 'number' && Number.isFinite(o.backingScaleFactor)
+      ? o.backingScaleFactor
+      : 1,
+  }
 }
 
 /**
@@ -988,6 +1088,28 @@ function modifierToAppleScript(m: string): string {
     case 'ctrl': case 'control': return 'control down'
     default: return ''
   }
+}
+
+/**
+ * Tag a crew dispatch as coming from the voice orb. Every orb backend (CLI
+ * MCP, direct API, Grok, Gemini) funnels through /send_to_tab — and direct
+ * user messages never do — so this is the one reliable place to mark the
+ * sender. The crew agents' system prompt (see buildCrewAgentHint in
+ * run-manager.ts) teaches them: <orb_dispatch> = the user's voice assistant
+ * speaking on the user's behalf, anything else = the user typing directly.
+ *
+ * Also the backstop for the project-path guarantee: the direct backends
+ * stamp the directory in withCrewHandoff (orb-direct-tools.ts), but the CLI
+ * orb's MCP path sends a bare prompt — if no "Project directory:" line made
+ * it in upstream, stamp the target tab's cwd here so every dispatch names
+ * the project it belongs to.
+ */
+function wrapOrbDispatch(prompt: string, projectDir: string): string {
+  if (prompt.startsWith('<orb_dispatch>')) return prompt
+  const stamped = !projectDir || prompt.includes('Project directory:')
+    ? prompt
+    : `${prompt}\n\n(Project directory: ${projectDir} — this is the project we're working on; resolve paths against it unless the task says otherwise.)`
+  return `<orb_dispatch>\n${stamped}\n</orb_dispatch>`
 }
 
 function expandHomeAlias(p: string): string {

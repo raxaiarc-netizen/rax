@@ -119,6 +119,61 @@ npm run build      # production build — must exit 0 with no errors
 - [ ] Skill auto-install silently skips on failure
 - [ ] All prompt/response functionality works (uses local CLI)
 
+## $0 Balance Model Gate (Rax's Claude)
+
+With a Rax cloud account whose credit balance is exactly $0 (sign in, spend
+or refund down to zero — the gate only engages on a CONFIRMED zero, never on
+a failed balance fetch):
+
+- [ ] Model picker (pill status bar, fullscreen composer, Settings) shows all
+      paid models greyed out with a lock; only "Rax Default" is selectable
+- [ ] Selection auto-switches to "Rax Default" shortly after launch (no 402
+      on the first message — chat, agents, and voice orb all answer on kimi)
+- [ ] `/model opus` in the input bar replies "locked — top up" and does NOT
+      switch
+- [ ] Settings → Rax Cloud → Top up, add credits in the browser, return to
+      the app: paid models unlock without a restart (focus refresh / ≤60 s
+      poll). Picking one works again
+- [ ] With the user's own Anthropic creds (system "Default" Claude) the gate
+      never engages regardless of Rax balance
+
+## First-Install Guided Tour
+
+On a machine (or userData) that has never run the app — or with
+`RAX_FORCE_TOUR=1` in dev — finish the welcome flow and let the intro
+cameo land:
+
+- [ ] ~1s after the mascot lands in the notch, Rax starts the spoken tour
+      (local Kokoro voice — works with zero API keys) and a black glass
+      card appears under the bar with progress dots + a "Skip tour" button
+- [ ] Steps cover: welcome, the pill/tab bar, the Voice tab, ⌥R hold-to-talk
+      (keycaps shown), ⇧⌘O hide/show (keycaps shown)
+- [ ] Gemini step: voice pitches the optional free key and Google AI Studio
+      opens in the default browser; with a Grok/Gemini key already saved,
+      both key steps are skipped and a short outro plays instead
+- [ ] Final step: bar pins open, gear icon appears with a pulsing spotlight,
+      status label reads "Tap the gear"; tapping it opens settings and ends
+      the tour
+- [ ] "Skip tour" stops speech immediately and the tour never replays
+- [ ] Clicking the notch (or ⌥R, or ⇧⌘O) mid-tour stops it quietly; next
+      app boot resumes from the interrupted step (`<userData>/orb-tour.json`)
+- [ ] After completion the tour never plays again on relaunch
+
+## Software Update Window
+
+Install the *previous* release, then publish the candidate build and verify
+the in-app update path (this is the only test that exercises the real
+`latest-mac.yml` + signed zip flow):
+
+- [ ] Tray → "Check for Updates…" opens the Software Update window
+- [ ] Window shows "Update Available" with version chips + release notes
+- [ ] "Download Update" shows live progress (%, MB of MB, speed, ETA)
+- [ ] On completion the window switches to "Ready to Install"
+- [ ] "Restart & Install" relaunches into the new version
+- [ ] "Install on Quit" closes the window; quitting the app applies the update
+- [ ] Settings → About → "Check for updates" reflects the same state inline
+- [ ] On the latest version, the window shows "You're up to date"
+
 ## Last Verified
 
 - **Date:** 2026-03-12

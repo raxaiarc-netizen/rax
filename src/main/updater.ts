@@ -2,8 +2,10 @@
 //
 // Wraps `electron-updater`'s autoUpdater so the rest of the app can drive
 // update checks through a small, typed surface. Status is broadcast over the
-// `IPC.UPDATER_STATUS` channel so the Settings "Check for updates" UI can
-// render progress without polling.
+// `IPC.UPDATER_STATUS` channel so the Software Update window and the Settings
+// "Check for updates" row can render progress without polling. All user-facing
+// decisions (download? restart?) happen in the Software Update window — this
+// module never opens native dialogs.
 //
 // Distribution provider is configured via `build.publish` in package.json
 // (GitHub releases). The autoUpdater reads `latest-mac.yml` from the release
@@ -18,7 +20,7 @@
 //     produces both; the .zip's `latest-mac.yml` entry is what gets
 //     downloaded and unpacked into the running .app.
 
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
 import { log as _log } from './logger'
 import { IPC } from '../shared/types'
@@ -58,6 +60,9 @@ let cachedStatus: UpdaterStatus = {
 }
 
 let broadcastFn: (channel: string, ...args: unknown[]) => void = () => {}
+/** Opens (or focuses) the dedicated Software Update window. Injected by
+ *  index.ts at init so this module stays free of window-management code. */
+let openUpdateWindowFn: () => void = () => {}
 let currentCheckUserInitiated = false
 let initialized = false
 
@@ -88,10 +93,14 @@ export function getStatus(): UpdaterStatus {
   return cachedStatus
 }
 
-export function initUpdater(broadcast: (channel: string, ...args: unknown[]) => void): void {
+export function initUpdater(
+  broadcast: (channel: string, ...args: unknown[]) => void,
+  openUpdateWindow?: () => void,
+): void {
   if (initialized) return
   initialized = true
   broadcastFn = broadcast
+  if (openUpdateWindow) openUpdateWindowFn = openUpdateWindow
 
   const support = isUpdaterSupported()
   if (!support.ok) {
@@ -130,15 +139,15 @@ export function initUpdater(broadcast: (channel: string, ...args: unknown[]) => 
     })
 
     // Background checks: auto-start the download so the user just gets a
-    // restart prompt when ready. User-initiated checks: prompt first so they
-    // know what's happening.
+    // restart prompt when ready. User-initiated checks: open the Software
+    // Update window so they can read the notes and choose.
     if (!currentCheckUserInitiated) {
       void downloadUpdate().catch((err) => {
         log(`auto-download failed: ${(err as Error).message}`)
       })
       return
     }
-    void promptUserForDownload(info)
+    openUpdateWindowFn()
   })
 
   autoUpdater.on('update-not-available', (info: UpdateInfo) => {
@@ -148,14 +157,8 @@ export function initUpdater(broadcast: (channel: string, ...args: unknown[]) => 
       availableVersion: info.version,
       error: undefined,
     })
-    if (currentCheckUserInitiated) {
-      void dialog.showMessageBox({
-        type: 'info',
-        title: 'Rax is up to date',
-        message: `You're running the latest version (v${app.getVersion()}).`,
-        buttons: ['OK'],
-      })
-    }
+    // No dialog: the Software Update window / Settings row render the
+    // "up to date" state inline wherever the check was started from.
   })
 
   autoUpdater.on('download-progress', (progress: ProgressInfo) => {
@@ -173,24 +176,21 @@ export function initUpdater(broadcast: (channel: string, ...args: unknown[]) => 
     setStatus({
       phase: 'downloaded',
       availableVersion: info.version,
+      releaseUrl: releaseUrlFor(info.version),
       downloadPercent: 100,
     })
-    void promptUserForInstall(info)
+    // Surface the "restart to install" decision in the Software Update
+    // window — for background downloads this is the first thing the user
+    // sees about the update.
+    openUpdateWindowFn()
   })
 
   autoUpdater.on('error', (err: Error) => {
     const message = err?.message || String(err)
     log(`updater error: ${message}`)
     setStatus({ phase: 'error', error: message })
-    if (currentCheckUserInitiated) {
-      void dialog.showMessageBox({
-        type: 'error',
-        title: 'Update check failed',
-        message: 'Could not check for updates.',
-        detail: message,
-        buttons: ['OK'],
-      })
-    }
+    // Errors render inline in the Software Update window / Settings row;
+    // background-check errors stay silent (next scheduled check retries).
   })
 
   log(`updater initialized — current v${app.getVersion()}`)
@@ -218,15 +218,6 @@ export async function checkForUpdates(
   const support = isUpdaterSupported()
   if (!support.ok) {
     setStatus({ phase: 'unsupported', error: support.reason })
-    if (opts.userInitiated) {
-      void dialog.showMessageBox({
-        type: 'info',
-        title: 'Auto-update unavailable',
-        message: 'Auto-update is not available in this build.',
-        detail: support.reason,
-        buttons: ['OK'],
-      })
-    }
     return cachedStatus
   }
   currentCheckUserInitiated = !!opts.userInitiated
@@ -236,15 +227,6 @@ export async function checkForUpdates(
     const message = (err as Error)?.message || String(err)
     log(`checkForUpdates threw: ${message}`)
     setStatus({ phase: 'error', error: message })
-    if (opts.userInitiated) {
-      void dialog.showMessageBox({
-        type: 'error',
-        title: 'Update check failed',
-        message: 'Could not reach the update server.',
-        detail: message,
-        buttons: ['OK'],
-      })
-    }
   }
   return cachedStatus
 }
@@ -261,6 +243,21 @@ export async function downloadUpdate(): Promise<void> {
   }
 }
 
+/**
+ * Strip every window's hide-on-close guard before installing.
+ *
+ * On macOS the native Squirrel quitAndInstall closes all windows FIRST and
+ * only calls app.quit() once they're gone — so `before-quit` has not fired
+ * yet, and any close handler that preventDefaults (the pill hides instead
+ * of closing) silently deadlocks the install. Exported so the dev-mode
+ * regression harness in index.ts can exercise the same path.
+ */
+export function prepareWindowsForUpdateInstall(): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    w.removeAllListeners('close')
+  }
+}
+
 export function installUpdate(): void {
   const support = isUpdaterSupported()
   if (!support.ok) return
@@ -269,43 +266,10 @@ export function installUpdate(): void {
   // current app, runs the installer, then relaunches.
   setImmediate(() => {
     try {
+      prepareWindowsForUpdateInstall()
       autoUpdater.quitAndInstall(false, true)
     } catch (err) {
       log(`quitAndInstall threw: ${(err as Error).message}`)
     }
   })
-}
-
-async function promptUserForDownload(info: UpdateInfo): Promise<void> {
-  const focusedWindow = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-  const result = await dialog.showMessageBox(focusedWindow ?? undefined as unknown as BrowserWindow, {
-    type: 'info',
-    title: 'Update available',
-    message: `Rax v${info.version} is available`,
-    detail: `You're on v${app.getVersion()}. Download in the background and install on next quit?`,
-    buttons: ['Download', 'View release notes', 'Later'],
-    defaultId: 0,
-    cancelId: 2,
-  })
-  if (result.response === 0) {
-    void downloadUpdate()
-  } else if (result.response === 1) {
-    void shell.openExternal(releaseUrlFor(info.version))
-  }
-}
-
-async function promptUserForInstall(info: UpdateInfo): Promise<void> {
-  const focusedWindow = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-  const result = await dialog.showMessageBox(focusedWindow ?? undefined as unknown as BrowserWindow, {
-    type: 'info',
-    title: 'Update ready to install',
-    message: `Rax v${info.version} downloaded`,
-    detail: 'Restart now to apply the update? Your in-progress sessions will be reloaded.',
-    buttons: ['Restart now', 'Install on quit'],
-    defaultId: 0,
-    cancelId: 1,
-  })
-  if (result.response === 0) {
-    installUpdate()
-  }
 }

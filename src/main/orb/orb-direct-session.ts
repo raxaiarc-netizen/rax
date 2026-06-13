@@ -68,6 +68,19 @@ const MAX_TOOL_ITERATIONS = 24
 const RECENT_IMAGES_TO_KEEP = 2
 
 /**
+ * The text-side sibling of RECENT_IMAGES_TO_KEEP: a single bash/read/grep
+ * result can run to 200K chars (≈50K tokens), and history re-uploads it on
+ * every later turn even though the model almost never re-reads an old dump
+ * (it reruns the tool instead). The most recent N tool_results stay verbatim
+ * — that window covers the live see-act loop — and only OLDER results that
+ * exceed the threshold get clipped to a head + an explicit "rerun if needed"
+ * note, so small results (clicks, writes, list_tabs) are never touched.
+ */
+const RECENT_TOOL_RESULTS_TO_KEEP = 6
+const OLD_TOOL_RESULT_MAX_CHARS = 3_000
+const OLD_TOOL_RESULT_KEEP_CHARS = 1_200
+
+/**
  * Notification that a crew member finished a task in the background. Pushed
  * by `OrbController` whenever a dock agent emits `task_complete`. The orb
  * folds these into the next user turn (`<agent_updates kind="prepended">`)
@@ -579,8 +592,12 @@ export class OrbDirectSession extends EventEmitter {
     // history, every subsequent turn re-uploads them and the model
     // re-decodes them, which is where the 8-9 second "stuck on Listening…"
     // lag was coming from. We keep the most recent N images intact and
-    // replace older ones with a short text placeholder.
-    const pruned = pruneOldImages(this.history, RECENT_IMAGES_TO_KEEP)
+    // replace older ones with a short text placeholder. The same treatment
+    // applies to oversized old TEXT tool results (giant bash/read dumps).
+    const pruned = pruneOldToolResults(
+      pruneOldImages(this.history, RECENT_IMAGES_TO_KEEP),
+      RECENT_TOOL_RESULTS_TO_KEEP,
+    )
 
     // Tag the LAST message with cache_control so we cache up through "the
     // conversation so far". On the next iteration of the loop, the new last
@@ -950,6 +967,61 @@ function pruneOldImages(messages: MessageParam[], keepCount: number): MessagePar
 }
 
 /**
+ * Clip oversized text inside OLDER `tool_result`s so a one-off giant bash /
+ * read / grep dump doesn't ride along (and get re-billed) on every turn for
+ * the rest of the session. Mirrors pruneOldImages: walk newest-first, leave
+ * the most recent `keepCount` tool_results untouched, then clip any older
+ * one whose text exceeds OLD_TOOL_RESULT_MAX_CHARS down to a head plus an
+ * explicit note telling the model to rerun the tool if it needs the data.
+ *
+ * Like the image pruner, this mutates only the per-request clone — the full
+ * results stay in `this.history`, and the clipping is deterministic (depends
+ * only on block size), so once a result ages out of the keep-window the
+ * pruned prefix is stable across turns and prompt caching keeps working.
+ */
+function pruneOldToolResults(messages: MessageParam[], keepCount: number): MessageParam[] {
+  let seen = 0
+  const cloned: MessageParam[] = messages.map((m) => ({
+    ...m,
+    content: Array.isArray(m.content) ? [...m.content] : m.content,
+  }))
+  const clipText = (text: string): string =>
+    text.slice(0, OLD_TOOL_RESULT_KEEP_CHARS) +
+    `\n…[${text.length - OLD_TOOL_RESULT_KEEP_CHARS} chars of older tool output trimmed from context — rerun the tool if you need it again]`
+  for (let i = cloned.length - 1; i >= 0; i--) {
+    const msg = cloned[i]
+    if (!Array.isArray(msg.content)) continue
+    for (let j = msg.content.length - 1; j >= 0; j--) {
+      const block = msg.content[j] as ContentBlockParam
+      if (block.type !== 'tool_result') continue
+      if (seen < keepCount) {
+        seen++
+        continue
+      }
+      if (typeof block.content === 'string') {
+        if (block.content.length > OLD_TOOL_RESULT_MAX_CHARS) {
+          msg.content[j] = { ...block, content: clipText(block.content) }
+        }
+      } else if (Array.isArray(block.content)) {
+        // Image blocks are pruneOldImages' job — only clip oversized text
+        // siblings here (e.g. a screenshot's long text channel never is).
+        let changed = false
+        const rewritten = block.content.map((sub) => {
+          const t = sub as { type?: string; text?: string }
+          if (t.type === 'text' && typeof t.text === 'string' && t.text.length > OLD_TOOL_RESULT_MAX_CHARS) {
+            changed = true
+            return { type: 'text' as const, text: clipText(t.text) }
+          }
+          return sub
+        })
+        if (changed) msg.content[j] = { ...block, content: rewritten }
+      }
+    }
+  }
+  return cloned
+}
+
+/**
  * Mark the LAST message in the conversation with cache_control: ephemeral so
  * the SDK packs it into the cached prefix. On every subsequent turn, the
  * cumulative prefix is read from cache instead of re-billed at full price.
@@ -1041,7 +1113,7 @@ const SYSTEM_PROMPT_TEXT = [
   '  • `prompt` — the concrete task you want done, in your words.',
   '  • `userRequest` — what the user actually SAID, verbatim, whenever the dispatch came from a user ask. This is the safety net: if your task rewrite drifts, the crew member falls back to the user\'s real words. Omit only for work you started entirely on your own.',
   '  • `context` — one or two lines of constraints, prior decisions, or file paths the task line alone doesn\'t capture ("user is on the notch-ui branch", "they already rejected the modal approach"). Skip when there\'s nothing extra.',
-  'Keep it tight — this is a brief, not a transcript. A trivial self-initiated dispatch can pass `prompt` alone.',
+  'Keep it tight — this is a brief, not a transcript. A trivial self-initiated dispatch can pass `prompt` alone. The project directory is stamped onto every dispatch automatically — don\'t repeat it.',
   '',
   'rax_screenshot — the OS cursor is HIDDEN; a RED RING + white dot marks the cursor. Use for FOLLOW-UP captures (verify a control_screen action, check a non-cursor display). The initial view is auto-attached when the user references their screen.',
   'rax_control_screen — coordinates are IMAGE-PIXEL coords of your most recent rax_screenshot (top-left origin). The tool converts to display points and posts real CGEvent events so clicks work in browsers, Electron apps, Slack, IDEs. ALWAYS screenshot first; re-capture if the screenshot is older than ~2 turns. If error="accessibility_denied", tell the user to approve Rax in System Settings → Privacy & Security → Accessibility.',

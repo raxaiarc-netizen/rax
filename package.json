@@ -24,11 +24,12 @@
     "vendor-claude": "bash scripts/vendor-claude.sh",
     "vendor-whisper": "bash scripts/vendor-whisper.sh",
     "vendor-kokoro": "bash scripts/vendor-kokoro.sh",
+    "vendor-macwindow": "bash scripts/vendor-macwindow.sh",
     "preview-voices": "node scripts/preview-voices.mjs",
-    "vendor-all": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh",
-    "prebuild": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh",
-    "predist": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh",
-    "postinstall": "electron-builder install-app-deps && bash scripts/patch-dev-icon.sh && (bash scripts/vendor-claude.sh || true) && (bash scripts/vendor-whisper.sh || true) && (bash scripts/vendor-kokoro.sh || true)"
+    "vendor-all": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh && bash scripts/vendor-macwindow.sh",
+    "prebuild": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh && bash scripts/vendor-macwindow.sh",
+    "predist": "bash scripts/vendor-claude.sh && bash scripts/vendor-whisper.sh && bash scripts/vendor-kokoro.sh && bash scripts/vendor-macwindow.sh",
+    "postinstall": "electron-builder install-app-deps && bash scripts/patch-dev-icon.sh && (bash scripts/vendor-claude.sh || true) && (bash scripts/vendor-whisper.sh || true) && (bash scripts/vendor-kokoro.sh || true) && (bash scripts/vendor-macwindow.sh || true)"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.96.0",
@@ -58,6 +59,7 @@
       "!resources/claude-cli/**/*",
       "!resources/whisper/**/*",
       "!resources/kokoro-cache/**/*",
+      "!resources/native/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -81,6 +83,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "resources/native",
+        "to": "native",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
@@ -94,11 +103,17 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
       "extendInfo": {
@@ -128,6 +143,7 @@
     "electron": "^35.7.5",
     "electron-builder": "^26.8.1",
     "electron-vite": "^3.0.0",
+    "node-api-headers": "^1.9.0",
     "postcss": "^8.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

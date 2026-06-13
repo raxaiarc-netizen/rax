@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, CodeModeState, MirrorAction, SessionSnapshot, ClaudeMode } from '../../shared/types'
-import { ORB_TAB_ID, DEFAULT_MODEL_ID, isEffortLevel } from '../../shared/types'
+import { ORB_TAB_ID, DEFAULT_MODEL_ID, RAX_DEFAULT_MODEL_ID, isEffortLevel } from '../../shared/types'
 import type { EffortLevel } from '../../shared/types'
 import { AGENTS, DEFAULT_AGENT_ID, getAgent, isAgentId } from '../../shared/agents'
 import { useThemeStore } from '../theme'
@@ -36,10 +36,10 @@ export const AVAILABLE_MODELS: readonly ModelOption[] = [
   { id: 'claude-opus-4-6', label: 'Opus 4.6' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
-  // Rax Default — wire id is still `kimi-k2.6` (the Moonshot model the proxy
+  // Rax Default — wire id is `kimi-k2.7-code` (the Moonshot model the proxy
   // forwards to server-side). The UI label is genericized so users see this
   // as a first-class Rax model rather than as a third-party brand.
-  { id: 'kimi-k2.6', label: 'Rax Default', raxOnly: true },
+  { id: RAX_DEFAULT_MODEL_ID, label: 'Rax Default', raxOnly: true },
 ]
 
 export function isRaxOnlyModel(modelId: string): boolean {
@@ -53,11 +53,33 @@ export function getSelectableModels(claudeMode: ClaudeMode): ModelOption[] {
   return AVAILABLE_MODELS.filter((m) => !m.raxOnly || claudeMode === 'bundled')
 }
 
+export interface SelectableModel extends ModelOption {
+  /** Visible but not pickable — paid model while the Rax credit balance is
+   *  $0 on the bundled "Rax's Claude". Unknown balance (null) fails open. */
+  locked: boolean
+}
+
+/** True when the $0-balance gate applies: bundled Claude (Rax proxy) with a
+ *  CONFIRMED zero/negative balance. A null balance (not signed in, fetch
+ *  failed, not loaded yet) never locks — fail open. */
+export function isBalanceLockActive(
+  claudeMode: ClaudeMode,
+  balanceCents: number | null,
+): boolean {
+  return claudeMode === 'bundled' && typeof balanceCents === 'number' && balanceCents <= 0
+}
+
 /** Convenience hook for pickers: AVAILABLE_MODELS filtered by the live
- *  Claude mode (see the wiring at the bottom of this file). */
-export function useSelectableModels(): ModelOption[] {
+ *  Claude mode, with per-model `locked` flags from the live Rax balance
+ *  (see the wiring at the bottom of this file). */
+export function useSelectableModels(): SelectableModel[] {
   const claudeMode = useSessionStore((s) => s.claudeMode)
-  return getSelectableModels(claudeMode)
+  const balanceCents = useSessionStore((s) => s.raxBalanceCents)
+  const lockActive = isBalanceLockActive(claudeMode, balanceCents)
+  return getSelectableModels(claudeMode).map((m) => ({
+    ...m,
+    locked: lockActive && !m.raxOnly,
+  }))
 }
 
 function normalizeModelId(modelId: string): string {
@@ -79,6 +101,14 @@ const MODEL_MIGRATION_KEY = 'rax:modelMigratedTo:claude-opus-4-8'
 function loadPersistedPreferredModel(): string {
   try {
     const stored = localStorage.getItem(PREFERRED_MODEL_STORAGE_KEY)
+    // One-time migration: the Rax Default model changed from kimi-k2.6 to
+    // kimi-k2.7-code. Users who had the old free-tier id selected should stay
+    // on the free tier instead of falling back to the paid default.
+    if (stored === 'kimi-k2.6' && !localStorage.getItem(MODEL_MIGRATION_KEY)) {
+      localStorage.setItem(PREFERRED_MODEL_STORAGE_KEY, RAX_DEFAULT_MODEL_ID)
+      localStorage.setItem(MODEL_MIGRATION_KEY, '1')
+      return RAX_DEFAULT_MODEL_ID
+    }
     if (
       stored &&
       LEGACY_DEFAULT_MODEL_IDS.includes(stored) &&
@@ -180,6 +210,9 @@ interface State {
    *  ("Default"). Kept live via onClaudeModeChanged (wiring at the bottom
    *  of this file) so pickers can hide rax-only models in system mode. */
   claudeMode: ClaudeMode
+  /** Rax credit balance in cents — null until the first successful fetch
+   *  (or when not signed in to Rax cloud). Drives the $0 model lock. */
+  raxBalanceCents: number | null
   /** User's preferred effort level (null = Claude CLI default) */
   preferredEffort: EffortLevel | null
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves all tool calls, 'bypass' skips all permission checks (dangerous) */
@@ -200,6 +233,7 @@ interface State {
 
   // Actions
   initStaticInfo: () => Promise<void>
+  applyRaxBalance: (cents: number | null) => void
   setPreferredModel: (model: string | null) => void
   setPreferredEffort: (effort: EffortLevel | null) => void
   setPermissionMode: (mode: 'ask' | 'auto' | 'bypass') => void
@@ -364,6 +398,7 @@ export const useSessionStore = create<State>((set, get) => ({
   staticInfo: null,
   preferredModel: loadPersistedPreferredModel(),
   claudeMode: 'bundled',
+  raxBalanceCents: null,
   preferredEffort: loadPersistedPreferredEffort(),
   permissionMode: 'bypass',
 
@@ -408,7 +443,22 @@ export const useSessionStore = create<State>((set, get) => ({
     } catch {}
   },
 
+  applyRaxBalance: (cents) => {
+    if (get().raxBalanceCents !== cents) set({ raxBalanceCents: cents })
+    enforceBalanceLock()
+  },
+
   setPreferredModel: (model) => {
+    // $0-balance gate: on the bundled Claude with confirmed zero credits,
+    // only Rax Default (free tier) may be selected. `model: null` means
+    // "stock default" which is a paid Claude model, so it's gated too.
+    const { claudeMode, raxBalanceCents } = get()
+    if (
+      isBalanceLockActive(claudeMode, raxBalanceCents) &&
+      !isRaxOnlyModel(model || DEFAULT_MODEL_ID)
+    ) {
+      return
+    }
     set({ preferredModel: model })
     persistPreferredModel(model)
     publishMirror({ kind: 'preferred-model', model })
@@ -1744,6 +1794,10 @@ function applyClaudeMode(mode: ClaudeMode): void {
   if (mode === 'system' && state.preferredModel && isRaxOnlyModel(state.preferredModel)) {
     state.setPreferredModel(null)
   }
+  // Flipping back to bundled with a confirmed $0 balance re-applies the
+  // free-tier lock (the selection may have drifted to a paid model while
+  // in system mode).
+  if (mode === 'bundled') enforceBalanceLock()
 }
 
 try {
@@ -1752,4 +1806,73 @@ try {
 } catch {
   // Window without the full preload bridge (tests, future embeds) — keep the
   // 'bundled' default, which leaves every model visible.
+}
+
+// ─── Rax balance tracking ───
+// The Rax proxy serves kimi-* (Rax Default) free and bills Claude models
+// against the prepaid credit balance. At a CONFIRMED $0 balance the paid
+// models are locked in every picker and the selection is forced to Rax
+// Default — otherwise the user's first message just 402s mid-chat. Unknown
+// balance (fetch failed, signed out, not loaded yet) fails OPEN so a network
+// blip never strands someone with credits on the free tier.
+
+/** Force the selection onto Rax Default while the $0 lock is active.
+ *  setPreferredModel also persists, mirrors to the other renderer, and
+ *  re-aligns the voice orb, so every spawn path picks the change up. */
+function enforceBalanceLock(): void {
+  const s = useSessionStore.getState()
+  if (!isBalanceLockActive(s.claudeMode, s.raxBalanceCents)) return
+  const effective = s.preferredModel || DEFAULT_MODEL_ID
+  if (isRaxOnlyModel(effective)) return
+  // setPreferredModel's own gate allows rax-only models through.
+  s.setPreferredModel(RAX_DEFAULT_MODEL_ID)
+}
+
+let balanceFetchInflight = false
+export async function refreshRaxBalance(): Promise<void> {
+  if (balanceFetchInflight) return
+  balanceFetchInflight = true
+  try {
+    const acct = await window.rax.raxAuthFetchAccount()
+    if (typeof acct?.balanceCents === 'number') {
+      useSessionStore.getState().applyRaxBalance(acct.balanceCents)
+    } else if (acct?.error === 'not_signed_in') {
+      // Signed out of Rax cloud — no balance to enforce.
+      useSessionStore.getState().applyRaxBalance(null)
+    }
+    // Other errors (offline, 5xx): keep the last-known balance rather than
+    // flapping the lock open and shut on every network hiccup.
+  } catch {
+  } finally {
+    balanceFetchInflight = false
+  }
+}
+
+try {
+  void refreshRaxBalance()
+
+  // The balance moves outside the app (top-ups in the browser) — re-check
+  // whenever the window regains focus, and poll while the lock is engaged so
+  // a top-up unlocks the models without a restart.
+  window.addEventListener('focus', () => { void refreshRaxBalance() })
+  setInterval(() => {
+    const s = useSessionStore.getState()
+    if (isBalanceLockActive(s.claudeMode, s.raxBalanceCents)) void refreshRaxBalance()
+  }, 60_000)
+
+  // Every finished run spends credits — refresh shortly after the last
+  // active run ends so hitting $0 locks the pickers for the NEXT message.
+  let prevRunning = 0
+  useSessionStore.subscribe((s) => {
+    const running = s.tabs.reduce(
+      (n, t) => n + (t.status === 'running' || t.status === 'connecting' ? 1 : 0),
+      0,
+    )
+    if (running < prevRunning) {
+      setTimeout(() => { void refreshRaxBalance() }, 1500)
+    }
+    prevRunning = running
+  })
+} catch {
+  // No preload bridge — balance stays null, lock stays open.
 }

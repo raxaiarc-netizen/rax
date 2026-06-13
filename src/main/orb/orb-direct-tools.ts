@@ -161,13 +161,19 @@ export function buildToolDefs(): ToolDef[] {
     {
       name: 'rax_control_screen',
       description:
-        'Drive the user\'s mouse and keyboard. ALWAYS rax_screenshot FIRST — clicks are calibrated against the most recent screenshot. Coordinates are IMAGE-PIXEL coordinates of that screenshot (top-left origin). Real CGEvent mouse/keyboard, works in browsers, Electron apps, Slack, IDEs. Actions: click {x,y,button?}, double_click {x,y}, type {text}, key {key, modifiers?}, scroll {dy?,dx?}, cursor_position. If response has error="accessibility_denied", tell the user to approve Rax in System Settings → Privacy & Security → Accessibility.',
+        'Drive the user\'s mouse and keyboard. Default coordinates are IMAGE-PIXEL coordinates (top-left origin) of the most recent rax_screenshot — take one FIRST to calibrate. Alternatively pass unit="norm1000" to give x,y as 0-1000 proportions of the most recent screen frame (0,0 = top-left, 1000,1000 = bottom-right) — use this when acting on live screen-share frames, no screenshot needed. Real CGEvent mouse/keyboard, works in browsers, Electron apps, Slack, IDEs. Actions: click {x,y,button?}, double_click {x,y}, type {text}, key {key, modifiers?}, scroll {dy?,dx?}, cursor_position. If response has error="accessibility_denied", tell the user to approve Rax in System Settings → Privacy & Security → Accessibility.',
       input_schema: {
         type: 'object',
         properties: {
           action: { type: 'string', enum: ['click', 'double_click', 'type', 'key', 'scroll', 'cursor_position'] },
           x: { type: 'integer' },
           y: { type: 'integer' },
+          unit: {
+            type: 'string',
+            enum: ['px', 'norm1000'],
+            description:
+              'Coordinate space for x,y on click/double_click. "px" (default): image pixels of the latest rax_screenshot. "norm1000": 0-1000 proportions of the latest screen frame — scale-free, for clicking what you see in live screen-share frames.',
+          },
           button: { type: 'string', enum: ['left', 'right'] },
           text: { type: 'string' },
           key: { type: 'string' },
@@ -208,12 +214,16 @@ export function buildToolDefs(): ToolDef[] {
     },
     {
       name: 'rax_send_to_tab',
-      description: 'Dispatch a prompt to a named crew member (fire and forget). Pass their NAME as `tab` ("Max" / "Alex" / "Luna" / "Nova" / "Zara"). Tell the user out loud who you handed it to.',
+      description: 'Dispatch a prompt to a named crew member (fire and forget). Pass their NAME as `tab` ("Max" / "Alex" / "Luna" / "Nova" / "Zara"). The crew member heard NOTHING of this conversation — your prompt is all they get (the project directory is stamped on automatically). Tell the user out loud who you handed it to.',
       input_schema: {
         type: 'object',
         properties: {
           tab: { type: 'string', description: 'Crew member name — Max, Alex, Luna, Nova, or Zara.' },
-          prompt: { type: 'string', description: 'The execution brief — the concrete task you want the crew member to carry out.' },
+          prompt: {
+            type: 'string',
+            description:
+              'The execution brief — a complete, self-contained task written like a ticket for a teammate who heard nothing: WHAT to do, WHERE (file paths, app, area of the codebase) when known, and what DONE looks like. Never a bare topic like "the bug" or "fix the website". Do not include the project directory — it is appended automatically.',
+          },
           userRequest: {
             type: 'string',
             description: "The user's request in their OWN words, verbatim (what they actually said). Pass this whenever the dispatch came from a user ask so the crew member can recover true intent if your rewrite drifts. Omit only for purely self-initiated dispatches.",
@@ -228,12 +238,16 @@ export function buildToolDefs(): ToolDef[] {
     },
     {
       name: 'rax_send_to_tab_and_wait',
-      description: 'Dispatch a prompt to a named crew member AND wait for them to finish, returning their final assistant message. Use when the user needs the answer before you can reply. Pass agent NAME as `tab`.',
+      description: 'Dispatch a prompt to a named crew member AND wait for them to finish, returning their final assistant message. Use when the user needs the answer before you can reply. Pass agent NAME as `tab`. The crew member heard NOTHING of this conversation — your prompt is all they get (the project directory is stamped on automatically).',
       input_schema: {
         type: 'object',
         properties: {
           tab: { type: 'string', description: 'Crew member name — Max, Alex, Luna, Nova, or Zara.' },
-          prompt: { type: 'string', description: 'The execution brief — the concrete task you want the crew member to carry out.' },
+          prompt: {
+            type: 'string',
+            description:
+              'The execution brief — a complete, self-contained task written like a ticket for a teammate who heard nothing: WHAT to do, WHERE (file paths, app, area of the codebase) when known, and what DONE looks like. Never a bare topic like "the bug" or "fix the website". Do not include the project directory — it is appended automatically.',
+          },
           userRequest: {
             type: 'string',
             description: "The user's request in their OWN words, verbatim. Pass this whenever the dispatch came from a user ask so the crew member can recover true intent if your rewrite drifts.",
@@ -319,7 +333,7 @@ export async function executeTool(
     // so the receiving RPC sees only the enriched `prompt` — the contract is
     // unchanged, the crew member just gets a far better brief.
     if (name === 'rax_send_to_tab' || name === 'rax_send_to_tab_and_wait') {
-      input = withCrewHandoff(input)
+      input = withCrewHandoff(input, ctx.projectPath)
     }
     // Capture pipeline now adaptively shrinks PNG to fit Anthropic's 5MB cap
     // while keeping calibration coherent (see screen-capture.ts). Direct
@@ -353,27 +367,39 @@ export async function executeTool(
  * that carries the verbatim ask + context, plus a short reading contract,
  * lets the crew member recover true intent when the rewrite drifts.
  *
- * Only wraps when there's something extra to carry (userRequest/context). A
- * plain prompt with neither passes straight through unchanged, so trivial
- * self-initiated dispatches stay terse.
+ * The project directory is ALWAYS stamped into the dispatch — mechanically,
+ * here, not by asking the model to remember. The realtime backends (Grok,
+ * Gemini) routinely write briefs with no paths at all; without the stamp the
+ * crew member has no idea which project the work belongs to. The full
+ * <crew_handoff> wrapper is only built when there's something extra to carry
+ * (userRequest/context); a plain prompt just gets the project line appended,
+ * so trivial self-initiated dispatches stay terse.
  */
-function withCrewHandoff(input: Record<string, unknown>): Record<string, unknown> {
+function withCrewHandoff(input: Record<string, unknown>, projectPath: string): Record<string, unknown> {
   const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
   const userRequest = typeof input.userRequest === 'string' ? input.userRequest.trim() : ''
   const context = typeof input.context === 'string' ? input.context.trim() : ''
+  const project = (projectPath || '').trim()
 
   // Strip the orb-only fields regardless — the RPC contract is {tab, prompt}.
   const { userRequest: _u, context: _c, ...rest } = input
 
-  if (!userRequest && !context) return rest
+  if (!userRequest && !context) {
+    if (!project) return rest
+    return {
+      ...rest,
+      prompt: `${prompt}\n\n(Project directory: ${project} — this is the project we're working on; resolve paths against it unless the task says otherwise.)`,
+    }
+  }
 
   const lines = ['<crew_handoff>']
+  if (project) lines.push(`Project directory: ${project}`, '')
   if (userRequest) lines.push(`User's request, verbatim:\n${userRequest}`, '')
   lines.push(`Task brief:\n${prompt}`)
   if (context) lines.push('', `Context (constraints, prior decisions, paths):\n${context}`)
   lines.push(
     '',
-    'How to read this: the task brief is your proposed execution plan. Treat the verbatim request as the source of truth — if the brief and the request conflict, follow the request. Context is background, not instructions. On minor ambiguity, pick the most likely intent and proceed; only stop to ask if acting would hit the wrong target or do something irreversible.',
+    'How to read this: the task brief is your proposed execution plan. Treat the verbatim request as the source of truth — if the brief and the request conflict, follow the request. Context is background, not instructions. The project directory above is the project this work belongs to — work there unless the task explicitly targets another path. On minor ambiguity, pick the most likely intent and proceed; only stop to ask if acting would hit the wrong target or do something irreversible.',
     '</crew_handoff>',
   )
   return { ...rest, prompt: lines.join('\n') }

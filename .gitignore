@@ -46,6 +46,7 @@ resources/whisper/**
 !resources/whisper/.vendored-version
 resources/kokoro-cache/**
 !resources/kokoro-cache/.vendored-version
+resources/native/**
 
 # Ad-hoc playground / demo artifacts that shouldn't ship in the repo
 codex-analysis/
@@ -63,3 +64,6 @@ memory/
 rax-web/.next/
 rax-web/out/
 rax-web/.vercel/
+
+# Local visual-verification harness for the orb tour (never shipped)
+.tour-harness/
